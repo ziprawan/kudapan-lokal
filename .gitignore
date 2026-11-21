@@ -1,0 +1,6 @@
+.env
+savedata.json
+data/
+*.mdb
+*.tmp
+*.log
