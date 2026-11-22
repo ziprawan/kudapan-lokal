@@ -237,6 +237,80 @@ func TestWatcherVerboseLoggingAndSchedule(t *testing.T) {
 			t.Errorf("logs missing %q;\ngot:\n%s", want, logs)
 		}
 	}
+
+	// Verify Run() logs the minute-00 aligned next schedule before arming the timer.
+	var runLogBuf bytes.Buffer
+	schedTime := time.Date(2026, 11, 21, 14, 50, 12, 0, time.UTC)
+	schedSvc, err := New(Config{
+		StatePath:    filepath.Join(dir, "state.json"),
+		MasterDBPath: filepath.Join(dir, "master.mdb"),
+		Interval:     time.Hour,
+		CheckOnStart: false,
+	}, store, fetcher, notifier, WithLogger(log.New(&runLogBuf, "", 0)), WithClock(func() time.Time { return schedTime }))
+	if err != nil {
+		t.Fatalf("New(schedSvc) error = %v", err)
+	}
+	runCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := schedSvc.Run(runCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("schedSvc.Run() error = %v, want context.DeadlineExceeded", err)
+	}
+	wantSched := "next check scheduled at 2026-11-21 15:00:00 UTC (in 9m48s)"
+	if !strings.Contains(runLogBuf.String(), wantSched) {
+		t.Errorf("Run() logs missing %q;\ngot:\n%s", wantSched, runLogBuf.String())
+	}
+}
+
+func TestNextAlignedTime(t *testing.T) {
+	wib := time.FixedZone("WIB", 7*3600)
+	cases := []struct {
+		name     string
+		now      time.Time
+		interval time.Duration
+		want     time.Time
+		wantWait time.Duration
+	}{
+		{
+			name:     "mid hour +07:00",
+			now:      time.Date(2026, 11, 22, 14, 50, 12, 0, wib),
+			interval: time.Hour,
+			want:     time.Date(2026, 11, 22, 15, 0, 0, 0, wib),
+			wantWait: 9*time.Minute + 48*time.Second,
+		},
+		{
+			name:     "exact hour +07:00",
+			now:      time.Date(2026, 11, 22, 15, 0, 0, 0, wib),
+			interval: time.Hour,
+			want:     time.Date(2026, 11, 22, 16, 0, 0, 0, wib),
+			wantWait: time.Hour,
+		},
+		{
+			name:     "midnight rollover +07:00",
+			now:      time.Date(2026, 11, 22, 23, 59, 59, 0, wib),
+			interval: time.Hour,
+			want:     time.Date(2026, 11, 23, 0, 0, 0, 0, wib),
+			wantWait: time.Second,
+		},
+		{
+			name:     "sub-hour interval",
+			now:      time.Date(2026, 11, 22, 14, 7, 30, 0, time.UTC),
+			interval: 15 * time.Minute,
+			want:     time.Date(2026, 11, 22, 14, 15, 0, 0, time.UTC),
+			wantWait: 7*time.Minute + 30*time.Second,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NextAlignedTime(tc.now, tc.interval)
+			if !got.Equal(tc.want) {
+				t.Errorf("NextAlignedTime(%v, %s) = %v, want %v", tc.now, tc.interval, got, tc.want)
+			}
+			if wait := got.Sub(tc.now); wait != tc.wantWait {
+				t.Errorf("wait = %s, want %s", wait, tc.wantWait)
+			}
+		})
+	}
 }
 
 func TestWatcherThirdMessageForScenarioAndChampions(t *testing.T) {

@@ -119,16 +119,31 @@ func New(cfg Config, store *savedata.Store, fetcher MasterFetcher, notifier noti
 	return s, nil
 }
 
-// Run runs the check loop on cfg.Interval until ctx is canceled.
+// NextAlignedTime returns the next check time strictly after now aligned to an
+// interval boundary. For whole-hour intervals (including 1h), alignment runs in
+// now's local timezone at minute 00, second 00 (e.g. HH:00:00).
+func NextAlignedTime(now time.Time, interval time.Duration) time.Time {
+	if interval <= 0 {
+		interval = DefaultInterval
+	}
+	if interval >= time.Hour && interval%time.Hour == 0 {
+		hourStart := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
+		return hourStart.Add(interval)
+	}
+	return now.Truncate(interval).Add(interval)
+}
+
+func formatWaitDuration(d time.Duration) time.Duration {
+	if d >= time.Second {
+		return d.Round(time.Second)
+	}
+	return d.Round(time.Millisecond)
+}
+
+// Run runs the check loop aligned to cfg.Interval boundaries until ctx is canceled.
 func (s *Service) Run(ctx context.Context) error {
 	s.logger.Printf("watcher loop started (interval=%s, check_on_start=%v, db=%q, state=%q)",
 		s.cfg.Interval, s.cfg.CheckOnStart, s.cfg.MasterDBPath, s.cfg.StatePath)
-
-	logNext := func() {
-		nextAt := s.now().Add(s.cfg.Interval)
-		s.logger.Printf("next check scheduled at %s (in %s)",
-			nextAt.Format("2006-01-02 15:04:05 MST"), s.cfg.Interval)
-	}
 
 	runCheck := func() {
 		started := s.now()
@@ -139,28 +154,42 @@ func (s *Service) Run(ctx context.Context) error {
 				return
 			}
 			s.logger.Printf("[check] failed (after %s): %v", elapsed, err)
-			logNext()
 			return
 		}
 		s.LogCheckResult(res, elapsed)
-		logNext()
 	}
 
 	if s.cfg.CheckOnStart {
 		runCheck()
-	} else {
-		logNext()
-	}
-
-	ticker := time.NewTicker(s.cfg.Interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			s.logger.Printf("watcher loop stopping: %v", ctx.Err())
 			return ctx.Err()
-		case <-ticker.C:
+		}
+	}
+
+	var lastTarget time.Time
+	for {
+		now := s.now()
+		nextAt := NextAlignedTime(now, s.cfg.Interval)
+		if !lastTarget.IsZero() && !nextAt.After(lastTarget) {
+			nextAt = lastTarget.Add(s.cfg.Interval)
+		}
+		lastTarget = nextAt
+
+		wait := nextAt.Sub(now)
+		if wait < 0 {
+			wait = 0
+		}
+		s.logger.Printf("next check scheduled at %s (in %s)",
+			nextAt.Format("2006-01-02 15:04:05 MST"), formatWaitDuration(wait))
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			s.logger.Printf("watcher loop stopping: %v", ctx.Err())
+			return ctx.Err()
+		case <-timer.C:
 			runCheck()
 		}
 	}
