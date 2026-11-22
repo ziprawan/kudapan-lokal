@@ -212,6 +212,66 @@ func TestResolveMasterURLAndDownloadEndToEnd(t *testing.T) {
 	}
 }
 
+func TestCheckResourceVersionDoesNotFetchManifests(t *testing.T) {
+	store, err := savedata.LoadOrInit(filepath.Join(t.TempDir(), "savedata.json"))
+	if err != nil {
+		t.Fatalf("LoadOrInit() error = %v", err)
+	}
+	iv, err := umaclient.DeriveIV(store.Data().UDID)
+	if err != nil {
+		t.Fatalf("DeriveIV() error = %v", err)
+	}
+
+	var apiCalls, cdnCalls int
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/dl/") {
+			cdnCalls++
+			t.Errorf("unexpected manifest/CDN request during CheckResourceVersion: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Path == "/umamusume/tool/get_pre_download_resource_version" {
+			apiCalls++
+			cdnHost := strings.TrimPrefix(srv.URL, "http://") + "/dl/vertical/"
+			rawMsgpack, _ := msgpack.Marshal(map[string]any{
+				"response_code": 1,
+				"data_headers": map[string]any{
+					"result_code": 1,
+					"server_list": map[string]any{"resource_server": cdnHost},
+				},
+				"data": map[string]any{"resource_version": "10009999"},
+			})
+			enc, _ := umaclient.EncryptBody(rawMsgpack, iv, nil)
+			_, _ = w.Write([]byte(base64.StdEncoding.EncodeToString(enc)))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	apiClient, err := umaclient.New(store, umaclient.WithBaseURL(srv.URL+"/umamusume"), umaclient.WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("umaclient.New() error = %v", err)
+	}
+	recv, err := New(store, apiClient, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	rv, err := recv.CheckResourceVersion(context.Background())
+	if err != nil {
+		t.Fatalf("CheckResourceVersion() error = %v", err)
+	}
+	wantCDN := "https://" + strings.TrimPrefix(srv.URL, "http://") + "/dl/vertical/"
+	if rv.ResourceVersion != "10009999" || rv.CDNBaseURL != wantCDN {
+		t.Errorf("ResourceVersionInfo = %+v, want RES-VER=10009999 CDN=%q", rv, wantCDN)
+	}
+	if apiCalls != 1 || cdnCalls != 0 {
+		t.Errorf("apiCalls=%d cdnCalls=%d, want apiCalls=1 cdnCalls=0", apiCalls, cdnCalls)
+	}
+}
+
 func TestDownloadMasterRejectsNonSQLite(t *testing.T) {
 	store, err := savedata.LoadOrInit(filepath.Join(t.TempDir(), "savedata.json"))
 	if err != nil {

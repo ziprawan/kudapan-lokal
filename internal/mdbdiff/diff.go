@@ -32,10 +32,13 @@ func (d TableDiff) HasChanges() bool {
 	return d.Added > 0 || d.Deleted > 0 || d.Changed > 0
 }
 
-// DiffResult contains the full table diff summary and detailed campaign_data diff.
+// DiffResult contains the full table diff summary and detailed diffs for
+// campaign_data, single_mode_scenario, and champions_schedule.
 type DiffResult struct {
-	Tables   []TableDiff
-	Campaign CampaignDiff
+	Tables    []TableDiff
+	Campaign  CampaignDiff
+	Scenario  ScenarioDiff
+	Champions ChampionsDiff
 }
 
 // HasTableChanges reports whether any table in master.mdb differed.
@@ -137,10 +140,20 @@ func DiffFiles(oldPath, newPath string) (*DiffResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("diff campaign_data: %w", err)
 	}
+	scenarioDiff, err := diffScenarioData(oldDB, newDB)
+	if err != nil {
+		return nil, fmt.Errorf("diff single_mode_scenario: %w", err)
+	}
+	championsDiff, err := diffChampionsScheduleData(oldDB, newDB)
+	if err != nil {
+		return nil, fmt.Errorf("diff champions_schedule: %w", err)
+	}
 
 	return &DiffResult{
-		Tables:   tableDiffs,
-		Campaign: campaignDiff,
+		Tables:    tableDiffs,
+		Campaign:  campaignDiff,
+		Scenario:  scenarioDiff,
+		Champions: championsDiff,
 	}, nil
 }
 

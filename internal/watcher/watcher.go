@@ -25,8 +25,9 @@ const (
 
 // MasterFetcher abstracts masterdb.Receiver for testing.
 type MasterFetcher interface {
-	ResolveMaster(ctx context.Context) (*masterdb.MasterInfo, error)
-	DownloadMaster(ctx context.Context, dstPath string) (*masterdb.MasterInfo, error)
+	CheckResourceVersion(ctx context.Context) (*masterdb.ResourceVersionInfo, error)
+	ResolveManifest(ctx context.Context, rv *masterdb.ResourceVersionInfo) (*masterdb.MasterInfo, error)
+	DownloadMasterInfo(ctx context.Context, info *masterdb.MasterInfo, dstPath string) error
 }
 
 // Config configures the hourly resource watcher.
@@ -192,7 +193,7 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 	s.logger.Printf("[check] starting update check (last_res_ver=%s, baseline_db=%q)",
 		displayVer(st.LastResVer), s.cfg.MasterDBPath)
 
-	// Capture savedata RES-VER prior to ResolveMaster updating savedata.Store.
+	// Capture savedata RES-VER prior to CheckResourceVersion updating savedata.Store.
 	prevSavedResVer := s.store.Data().ResVer
 	seeded, err := s.ensureBaselineFromSeed()
 	if err != nil {
@@ -209,34 +210,41 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 			s.cfg.MasterDBPath, s.cfg.SeedMasterDBPath, displayVer(st.PendingOldResVer))
 	}
 
-	s.logger.Printf("[check] resolving latest RES-VER and manifest chain...")
-	info, err := s.fetcher.ResolveMaster(ctx)
+	s.logger.Printf("[check] checking latest RES-VER...")
+	rv, err := s.fetcher.CheckResourceVersion(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("resolve master info: %w", err)
+		return nil, fmt.Errorf("check resource version: %w", err)
 	}
-	s.logger.Printf("[check] server resolved RES-VER=%s (platform=%s, compressed_size=%d bytes)",
-		info.ResourceVersion, info.Platform, info.CompressedSize)
-	if s.cfg.Verbose && info.URL != "" {
-		s.logger.Printf("[check] resolved master.mdb.lz4 hash=%s url=%s", info.HashName, info.URL)
-	}
+	s.logger.Printf("[check] server returned RES-VER=%s", rv.ResourceVersion)
 
 	hasBaseline, err := fileExists(s.cfg.MasterDBPath)
 	if err != nil {
 		return nil, err
 	}
+	if hasBaseline && st.LastResVer != "" && rv.ResourceVersion == st.LastResVer {
+		s.logger.Printf("[check] RES-VER=%s matches local baseline; skipping manifest and database fetches",
+			rv.ResourceVersion)
+		return &CheckResult{
+			CheckedAt: checkedAt,
+			OldResVer: st.LastResVer,
+			NewResVer: rv.ResourceVersion,
+			Updated:   false,
+		}, nil
+	}
+
 	if !hasBaseline {
 		s.logger.Printf("[check] no baseline master.mdb at %q; downloading initial baseline...", s.cfg.MasterDBPath)
-		if _, err := s.fetcher.DownloadMaster(ctx, s.cfg.MasterDBPath); err != nil {
+		if _, err := s.resolveAndDownload(ctx, rv, s.cfg.MasterDBPath); err != nil {
 			return nil, fmt.Errorf("download initial baseline master.mdb: %w", err)
 		}
-		if err := SaveStateAtomic(s.cfg.StatePath, State{LastResVer: info.ResourceVersion}); err != nil {
+		if err := SaveStateAtomic(s.cfg.StatePath, State{LastResVer: rv.ResourceVersion}); err != nil {
 			return nil, err
 		}
 		s.logger.Printf("[check] baseline saved to %q and state updated (%s = %s)",
-			s.cfg.MasterDBPath, s.cfg.StatePath, info.ResourceVersion)
+			s.cfg.MasterDBPath, s.cfg.StatePath, rv.ResourceVersion)
 		return &CheckResult{
 			CheckedAt:           checkedAt,
-			NewResVer:           info.ResourceVersion,
+			NewResVer:           rv.ResourceVersion,
 			BaselineInitialized: true,
 		}, nil
 	}
@@ -245,23 +253,15 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 	if oldResVer == "" {
 		oldResVer = st.PendingOldResVer
 	}
-	if st.LastResVer != "" && info.ResourceVersion == st.LastResVer {
-		return &CheckResult{
-			CheckedAt: checkedAt,
-			OldResVer: st.LastResVer,
-			NewResVer: info.ResourceVersion,
-			Updated:   false,
-		}, nil
-	}
 
 	stagingPath := s.cfg.MasterDBPath + ".new"
 	defer func() {
 		_ = os.Remove(stagingPath)
 	}()
 
-	s.logger.Printf("[check] new RES-VER detected (%s -> %s); downloading candidate database to %q...",
-		displayVer(oldResVer), info.ResourceVersion, stagingPath)
-	if _, err := s.fetcher.DownloadMaster(ctx, stagingPath); err != nil {
+	s.logger.Printf("[check] new RES-VER detected (%s -> %s)", displayVer(oldResVer), rv.ResourceVersion)
+	info, err := s.resolveAndDownload(ctx, rv, stagingPath)
+	if err != nil {
 		return nil, fmt.Errorf("download new master.mdb: %w", err)
 	}
 
@@ -271,8 +271,11 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("diff master.mdb: %w", err)
 	}
-	s.logger.Printf("[check] diff complete: %d table(s) changed, campaign_data (+%d / -%d / ~%d)",
-		len(diff.Tables), len(diff.Campaign.Added), len(diff.Campaign.Deleted), len(diff.Campaign.Changed))
+	s.logger.Printf("[check] diff complete: %d table(s) changed, campaign_data (+%d / -%d / ~%d), single_mode_scenario (+%d / -%d / ~%d), champions_schedule (+%d / -%d / ~%d)",
+		len(diff.Tables),
+		len(diff.Campaign.Added), len(diff.Campaign.Deleted), len(diff.Campaign.Changed),
+		len(diff.Scenario.Added), len(diff.Scenario.Deleted), len(diff.Scenario.Changed),
+		len(diff.Champions.Added), len(diff.Champions.Deleted), len(diff.Champions.Changed))
 	if s.cfg.Verbose {
 		for _, td := range diff.Tables {
 			s.logger.Printf("[check]   table %s: +%d / -%d / ~%d", td.Table, td.Added, td.Deleted, td.Changed)
@@ -287,14 +290,27 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 	}
 	sent = append(sent, summaryMsg)
 
-	if campaignMsg, ok := notify.FormatCampaignDiffMessage(diff.Campaign, checkedAt); ok {
-		s.logger.Printf("[check] sending campaign_data notification (%d chars)...", len(campaignMsg))
-		if err := s.notifier.SendMessage(ctx, campaignMsg); err != nil {
-			return nil, fmt.Errorf("send campaign_data notification: %w", err)
+	sendOptional := func(label, msg string, ok bool) error {
+		if !ok {
+			s.logger.Printf("[check] no %s changes; skipping notification", label)
+			return nil
 		}
-		sent = append(sent, campaignMsg)
-	} else {
-		s.logger.Printf("[check] no active campaign_data changes; skipping campaign_data notification")
+		s.logger.Printf("[check] sending %s notification (%d chars)...", label, len(msg))
+		if err := s.notifier.SendMessage(ctx, msg); err != nil {
+			return fmt.Errorf("send %s notification: %w", label, err)
+		}
+		sent = append(sent, msg)
+		return nil
+	}
+
+	campaignMsg, campaignOK := notify.FormatCampaignDiffMessage(diff.Campaign, checkedAt)
+	if err := sendOptional("active campaign_data", campaignMsg, campaignOK); err != nil {
+		return nil, err
+	}
+
+	scheduleMsg, scheduleOK := notify.FormatScenarioAndChampionsMessage(diff.Scenario, diff.Champions, checkedAt)
+	if err := sendOptional("single_mode_scenario/champions_schedule", scheduleMsg, scheduleOK); err != nil {
+		return nil, err
 	}
 
 	if err := os.Rename(stagingPath, s.cfg.MasterDBPath); err != nil {
@@ -314,6 +330,23 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 		Diff:         diff,
 		SentMessages: sent,
 	}, nil
+}
+
+func (s *Service) resolveAndDownload(ctx context.Context, rv *masterdb.ResourceVersionInfo, dstPath string) (*masterdb.MasterInfo, error) {
+	s.logger.Printf("[check] resolving manifest chain for RES-VER=%s...", rv.ResourceVersion)
+	info, err := s.fetcher.ResolveManifest(ctx, rv)
+	if err != nil {
+		return nil, err
+	}
+	s.logger.Printf("[check] manifest resolved (platform=%s, compressed_size=%d bytes); downloading to %q...",
+		info.Platform, info.CompressedSize, dstPath)
+	if s.cfg.Verbose && info.URL != "" {
+		s.logger.Printf("[check] master.mdb.lz4 hash=%s url=%s", info.HashName, info.URL)
+	}
+	if err := s.fetcher.DownloadMasterInfo(ctx, info, dstPath); err != nil {
+		return nil, err
+	}
+	return info, nil
 }
 
 func displayVer(v string) string {

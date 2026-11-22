@@ -30,6 +30,13 @@ const (
 	masterDBAssetName       = "master.mdb.lz4"
 )
 
+// ResourceVersionInfo describes the latest RES-VER and CDN base URL returned
+// by tool/get_pre_download_resource_version without fetching any manifests.
+type ResourceVersionInfo struct {
+	ResourceVersion string
+	CDNBaseURL      string
+}
+
 // MasterInfo describes the resolved master.mdb.lz4 asset location and metadata.
 type MasterInfo struct {
 	ResourceVersion string
@@ -187,9 +194,10 @@ func (r *Receiver) logf(format string, args ...any) {
 	}
 }
 
-// ResolveMaster fetches the latest RES-VER, updates savedata.Store if changed,
-// traverses root -> platform -> master manifests, and returns resolved MasterInfo.
-func (r *Receiver) ResolveMaster(ctx context.Context) (*MasterInfo, error) {
+// CheckResourceVersion calls tool/get_pre_download_resource_version to obtain
+// the latest RES-VER and CDN base URL without fetching any manifests, updating
+// savedata.Store if RES-VER changed.
+func (r *Receiver) CheckResourceVersion(ctx context.Context) (*ResourceVersionInfo, error) {
 	meta := r.store.Data()
 	viewerID, err := strconv.ParseInt(meta.ViewerID, 10, 64)
 	if err != nil {
@@ -228,6 +236,27 @@ func (r *Receiver) ResolveMaster(ctx context.Context) (*MasterInfo, error) {
 	cdnBase := r.cdnBaseURL
 	if cdnBase == "" {
 		cdnBase = normalizeCDNBaseURL(apiResp.DataHeaders.ServerList.ResourceServer)
+	}
+	if cdnBase == "" {
+		cdnBase = DefaultCDNBaseURL
+	}
+
+	return &ResourceVersionInfo{
+		ResourceVersion: resVer,
+		CDNBaseURL:      cdnBase,
+	}, nil
+}
+
+// ResolveManifest traverses the root -> platform -> master manifests for rv and
+// returns the resolved master.mdb.lz4 download metadata.
+func (r *Receiver) ResolveManifest(ctx context.Context, rv *ResourceVersionInfo) (*MasterInfo, error) {
+	if rv == nil || strings.TrimSpace(rv.ResourceVersion) == "" {
+		return nil, errors.New("resource version info cannot be nil or empty")
+	}
+	resVer := strings.TrimSpace(rv.ResourceVersion)
+	cdnBase := normalizeCDNBaseURL(rv.CDNBaseURL)
+	if cdnBase == "" {
+		cdnBase = r.cdnBaseURL
 	}
 	if cdnBase == "" {
 		cdnBase = DefaultCDNBaseURL
@@ -287,40 +316,61 @@ func (r *Receiver) ResolveMaster(ctx context.Context) (*MasterInfo, error) {
 	}, nil
 }
 
+// ResolveMaster fetches the latest RES-VER, updates savedata.Store if changed,
+// traverses root -> platform -> master manifests, and returns resolved MasterInfo.
+func (r *Receiver) ResolveMaster(ctx context.Context) (*MasterInfo, error) {
+	rv, err := r.CheckResourceVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.ResolveManifest(ctx, rv)
+}
+
 // DownloadMaster resolves the master.mdb.lz4 URL, downloads it, decompresses LZ4,
 // validates the SQLite 3 header, and writes the database atomically to dstPath.
 func (r *Receiver) DownloadMaster(ctx context.Context, dstPath string) (*MasterInfo, error) {
-	if strings.TrimSpace(dstPath) == "" {
-		dstPath = DefaultOutputPath
-	}
-
 	info, err := r.ResolveMaster(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if err := r.DownloadMasterInfo(ctx, info, dstPath); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// DownloadMasterInfo downloads master.mdb.lz4 from an already-resolved MasterInfo,
+// decompresses LZ4, validates the SQLite 3 header, and writes atomically to dstPath.
+func (r *Receiver) DownloadMasterInfo(ctx context.Context, info *MasterInfo, dstPath string) error {
+	if info == nil || strings.TrimSpace(info.URL) == "" {
+		return errors.New("master info and download URL cannot be nil or empty")
+	}
+	if strings.TrimSpace(dstPath) == "" {
+		dstPath = DefaultOutputPath
 	}
 
 	r.logf("downloading %s (%d compressed bytes) -> %q", info.URL, info.CompressedSize, dstPath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.URL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build master.mdb request: %w", err)
+		return fmt.Errorf("build master.mdb request: %w", err)
 	}
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("download master.mdb.lz4: %w", err)
+		return fmt.Errorf("download master.mdb.lz4: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("download master.mdb.lz4 (%s) returned HTTP %d: %s",
+		return fmt.Errorf("download master.mdb.lz4 (%s) returned HTTP %d: %s",
 			info.URL, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 
 	if err := decompressSQLiteAtomic(resp.Body, dstPath); err != nil {
-		return nil, fmt.Errorf("save master.mdb to %q: %w", dstPath, err)
+		return fmt.Errorf("save master.mdb to %q: %w", dstPath, err)
 	}
 	r.logf("saved decompressed SQLite database to %q", dstPath)
-	return info, nil
+	return nil
 }
 
 func (r *Receiver) fetchManifestEntries(ctx context.Context, url string) ([]manifestEntry, error) {

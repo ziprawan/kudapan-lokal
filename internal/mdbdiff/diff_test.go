@@ -122,8 +122,90 @@ func TestDiffFilesIdenticalShortCircuits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiffFiles() error = %v", err)
 	}
-	if res.HasTableChanges() || !res.Campaign.IsEmpty() {
+	if res.HasTableChanges() || !res.Campaign.IsEmpty() || !res.Scenario.IsEmpty() || !res.Champions.IsEmpty() {
 		t.Fatalf("expected empty diff for identical files, got %+v", res)
+	}
+}
+
+func TestDiffScenarioAndChampionsSchedule(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.mdb")
+	newPath := filepath.Join(dir, "new.mdb")
+
+	schema := []string{
+		`CREATE TABLE text_data (id INTEGER NOT NULL, category INTEGER NOT NULL, "index" INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(category, "index"))`,
+		`CREATE TABLE single_mode_scenario (id INTEGER PRIMARY KEY, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL, max_speed INTEGER NOT NULL, max_stamina INTEGER NOT NULL, max_pow INTEGER NOT NULL, max_guts INTEGER NOT NULL, max_wiz INTEGER NOT NULL)`,
+		`CREATE TABLE champions_schedule (id INTEGER PRIMARY KEY, resource_id INTEGER NOT NULL, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL)`,
+		`CREATE TABLE champions_race_condition (champions_id INTEGER NOT NULL, round_id INTEGER NOT NULL, race_instance_id INTEGER NOT NULL, race_condition_id INTEGER NOT NULL, PRIMARY KEY(champions_id, round_id))`,
+		`CREATE TABLE race_instance (id INTEGER PRIMARY KEY, race_id INTEGER NOT NULL)`,
+		`CREATE TABLE race (id INTEGER PRIMARY KEY, course_set INTEGER NOT NULL)`,
+		`CREATE TABLE race_course_set (id INTEGER PRIMARY KEY, race_track_id INTEGER NOT NULL, distance INTEGER NOT NULL, ground INTEGER NOT NULL)`,
+	}
+
+	createTestDB(t, oldPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(119, 119, 1, 'URA Finale'),
+			(119, 119, 2, 'Unity Cup'),
+			(206, 206, 21, 'Capricorn Cup'),
+			(206, 206, 22, 'Aquarius Cup'),
+			(35, 35, 10006, 'Tokyo'),
+			(35, 35, 10007, 'Chukyo')`,
+		`INSERT INTO single_mode_scenario VALUES
+			(1, 1700000000, 1800000000, 200, 200, 200, 200, 200),
+			(2, 1710000000, 1800000000, 100, 100, 100, 100, 600)`,
+		`INSERT INTO champions_schedule VALUES
+			(21, 1, 1793138400, 1794002399),
+			(22, 2, 1794952800, 1795816799)`,
+		`INSERT INTO champions_race_condition VALUES (21, 0, 1, 1), (22, 0, 2, 1)`,
+		`INSERT INTO race_instance VALUES (1, 101), (2, 102)`,
+		`INSERT INTO race VALUES (101, 201), (102, 202)`,
+		`INSERT INTO race_course_set VALUES (201, 10007, 1200, 1), (202, 10006, 1600, 2)`,
+	})
+
+	createTestDB(t, newPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(119, 119, 1, 'URA Finale'),
+			(119, 119, 5, 'Grandmasters' || char(10) || 'Legacies Immortal'),
+			(206, 206, 21, 'Capricorn Cup'),
+			(206, 206, 23, 'Pisces Cup'),
+			(35, 35, 10006, 'Tokyo'),
+			(35, 35, 10007, 'Chukyo'),
+			(35, 35, 10009, 'Hanshin')`,
+		`INSERT INTO single_mode_scenario VALUES
+			(1, 1700000000, 1850000000, 200, 200, 200, 200, 200),
+			(5, 1795000000, 2524608000, 300, 300, 300, 300, 400)`,
+		`INSERT INTO champions_schedule VALUES
+			(21, 1, 1793138400, 1794090000),
+			(23, 3, 1796500000, 1797300000)`,
+		`INSERT INTO champions_race_condition VALUES (21, 0, 1, 1), (23, 0, 3, 1)`,
+		`INSERT INTO race_instance VALUES (1, 101), (3, 103)`,
+		`INSERT INTO race VALUES (101, 201), (103, 203)`,
+		`INSERT INTO race_course_set VALUES (201, 10007, 1200, 1), (203, 10009, 2000, 1)`,
+	})
+
+	res, err := DiffFiles(oldPath, newPath)
+	if err != nil {
+		t.Fatalf("DiffFiles() error = %v", err)
+	}
+
+	if len(res.Scenario.Added) != 1 || res.Scenario.Added[0].ID != 5 || res.Scenario.Added[0].Title != "Grandmasters Legacies Immortal" {
+		t.Fatalf("unexpected Scenario.Added: %+v", res.Scenario.Added)
+	}
+	if len(res.Scenario.Deleted) != 1 || res.Scenario.Deleted[0].ID != 2 || res.Scenario.Deleted[0].Title != "Unity Cup" {
+		t.Fatalf("unexpected Scenario.Deleted: %+v", res.Scenario.Deleted)
+	}
+	if len(res.Scenario.Changed) != 1 || res.Scenario.Changed[0].New.EndTime.Unix() != 1850000000 {
+		t.Fatalf("unexpected Scenario.Changed: %+v", res.Scenario.Changed)
+	}
+
+	if len(res.Champions.Added) != 1 || res.Champions.Added[0].ID != 23 || res.Champions.Added[0].Title != "Pisces Cup" || res.Champions.Added[0].Course != "Hanshin Turf 2000m" {
+		t.Fatalf("unexpected Champions.Added: %+v", res.Champions.Added)
+	}
+	if len(res.Champions.Deleted) != 1 || res.Champions.Deleted[0].ID != 22 || res.Champions.Deleted[0].Title != "Aquarius Cup" || res.Champions.Deleted[0].Course != "Tokyo Dirt 1600m" {
+		t.Fatalf("unexpected Champions.Deleted: %+v", res.Champions.Deleted)
+	}
+	if len(res.Champions.Changed) != 1 || res.Champions.Changed[0].New.ID != 21 || res.Champions.Changed[0].New.Course != "Chukyo Turf 1200m" {
+		t.Fatalf("unexpected Champions.Changed: %+v", res.Champions.Changed)
 	}
 }
 

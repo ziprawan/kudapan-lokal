@@ -149,6 +149,87 @@ func TestFormatCampaignDiffMessageUTCAndCountdown(t *testing.T) {
 	}
 }
 
+func TestFormatScenarioAndChampionsMessage(t *testing.T) {
+	now := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+
+	if msg, ok := FormatScenarioAndChampionsMessage(mdbdiff.ScenarioDiff{}, mdbdiff.ChampionsDiff{}, now); ok || msg != "" {
+		t.Fatalf("expected empty diff to return (\"\", false), got (%q, %v)", msg, ok)
+	}
+
+	scenarioOnly := mdbdiff.ScenarioDiff{
+		Added: []mdbdiff.ScenarioEvent{
+			{
+				ID:         5,
+				Title:      "Grandmasters Legacies Immortal",
+				StartTime:  now.Add(48*time.Hour + 3*time.Hour),
+				EndTime:    now.Add(10 * 24 * time.Hour),
+				MaxSpeed:   300,
+				MaxStamina: 300,
+				MaxPow:     300,
+				MaxGuts:    300,
+				MaxWiz:     400,
+			},
+		},
+	}
+	msgScenarioOnly, ok := FormatScenarioAndChampionsMessage(scenarioOnly, mdbdiff.ChampionsDiff{}, now)
+	if !ok {
+		t.Fatal("expected ok=true when single_mode_scenario has diffs")
+	}
+	if !strings.Contains(msgScenarioOnly, "single_mode_scenario changes") || strings.Contains(msgScenarioOnly, "champions_schedule changes") {
+		t.Errorf("unexpected section headings:\n%s", msgScenarioOnly)
+	}
+	if !strings.Contains(msgScenarioOnly, "Max stat bonus: Spd +300 / Sta +300 / Pow +300 / Gut +300 / Wit +400") ||
+		!strings.Contains(msgScenarioOnly, "Starts: 2026-11-24 03:00:00 UTC (in 2 days 3 hours)") {
+		t.Errorf("unexpected scenario-only body:\n%s", msgScenarioOnly)
+	}
+
+	championsOnly := mdbdiff.ChampionsDiff{
+		Added: []mdbdiff.ChampionsScheduleEvent{
+			{
+				ID:        23,
+				Title:     "Pisces Cup",
+				Course:    "Hanshin Turf 2000m",
+				StartTime: now.Add(5 * 24 * time.Hour),
+				EndTime:   now.Add(11 * 24 * time.Hour),
+			},
+		},
+		Changed: []mdbdiff.EntryChange[mdbdiff.ChampionsScheduleEvent]{
+			{
+				Old: mdbdiff.ChampionsScheduleEvent{
+					ID:        22,
+					Title:     "Aquarius Cup",
+					Course:    "Tokyo Dirt 1600m",
+					StartTime: now.Add(-24 * time.Hour),
+					EndTime:   now.Add(72 * time.Hour),
+				},
+				New: mdbdiff.ChampionsScheduleEvent{
+					ID:        22,
+					Title:     "Aquarius Cup",
+					Course:    "Tokyo Dirt 1600m",
+					StartTime: now.Add(-24 * time.Hour),
+					EndTime:   now.Add(96 * time.Hour),
+				},
+			},
+		},
+	}
+	msgChampOnly, ok := FormatScenarioAndChampionsMessage(mdbdiff.ScenarioDiff{}, championsOnly, now)
+	if !ok {
+		t.Fatal("expected ok=true when champions_schedule has diffs")
+	}
+	if strings.Contains(msgChampOnly, "single_mode_scenario changes") || !strings.Contains(msgChampOnly, "champions_schedule changes") {
+		t.Errorf("unexpected section headings:\n%s", msgChampOnly)
+	}
+	if !strings.Contains(msgChampOnly, "Course: Hanshin Turf 2000m") ||
+		!strings.Contains(msgChampOnly, "Ends: 2026-11-25 00:00:00 UTC -> 2026-11-26 00:00:00 UTC (in 4 days 0 hours)") {
+		t.Errorf("unexpected champions-only body:\n%s", msgChampOnly)
+	}
+
+	msgBoth, ok := FormatScenarioAndChampionsMessage(scenarioOnly, championsOnly, now)
+	if !ok || !strings.Contains(msgBoth, "single_mode_scenario changes") || !strings.Contains(msgBoth, "champions_schedule changes") {
+		t.Errorf("expected both sections when both differ:\n%s", msgBoth)
+	}
+}
+
 func TestSplitMessageAndTelegramSend(t *testing.T) {
 	var lines []string
 	for i := 0; i < 120; i++ {
