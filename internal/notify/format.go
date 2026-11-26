@@ -57,39 +57,74 @@ func formatTableDiffParts(td mdbdiff.TableDiff) []string {
 	return parts
 }
 
-// FormatCampaignDiffMessage formats Message 2: detailed campaign_data diffs
+// FormatCampaignDiffMessage formats Message 2 for campaign_data diffs only
 // (filtered to effect_type_1 != 0) enriched with text_data titles/descriptions,
 // UTC timestamps, and inline countdowns for upcoming starts and active ends.
 // Returns ("", false) when empty.
 func FormatCampaignDiffMessage(diff mdbdiff.CampaignDiff, now time.Time) (string, bool) {
-	if diff.IsEmpty() {
+	return FormatCampaignAndAnnounceMessage(diff, mdbdiff.AnnounceDiff{}, now)
+}
+
+// FormatCampaignAndAnnounceMessage formats Message 2: detailed campaign_data
+// diffs (filtered to effect_type_1 != 0) and announce_data diffs (character and
+// support card announcements). Returns ("", false) when both are empty.
+func FormatCampaignAndAnnounceMessage(
+	campaign mdbdiff.CampaignDiff,
+	announce mdbdiff.AnnounceDiff,
+	now time.Time,
+) (string, bool) {
+	if campaign.IsEmpty() && announce.IsEmpty() {
 		return "", false
 	}
 
-	changed := make([]mdbdiff.EntryChange[mdbdiff.CampaignEvent], len(diff.Changed))
-	for i, ch := range diff.Changed {
-		changed[i] = mdbdiff.EntryChange[mdbdiff.CampaignEvent]{Old: ch.Old, New: ch.New}
-	}
-	entryDiff := mdbdiff.EntryDiff[mdbdiff.CampaignEvent]{
-		Added:   diff.Added,
-		Deleted: diff.Deleted,
-		Changed: changed,
+	nowUTC := now.UTC()
+	var sb strings.Builder
+	wroteSection := false
+
+	if !campaign.IsEmpty() {
+		changed := make([]mdbdiff.EntryChange[mdbdiff.CampaignEvent], len(campaign.Changed))
+		for i, ch := range campaign.Changed {
+			changed[i] = mdbdiff.EntryChange[mdbdiff.CampaignEvent]{Old: ch.Old, New: ch.New}
+		}
+		entryDiff := mdbdiff.EntryDiff[mdbdiff.CampaignEvent]{
+			Added:   campaign.Added,
+			Deleted: campaign.Deleted,
+			Changed: changed,
+		}
+		writeEntryDiffBlock(&sb, "campaign_data changes", entryDiff, nowUTC, formatCampaignItem, formatCampaignChangeItem)
+		wroteSection = true
 	}
 
-	var sb strings.Builder
-	writeEntryDiffBlock(&sb, "campaign_data changes", entryDiff, now.UTC(), formatCampaignItem, formatCampaignChangeItem)
+	if !announce.IsEmpty() {
+		if wroteSection {
+			sb.WriteString("\n\n")
+		}
+		writeEntryDiffBlock(&sb, "announce_data changes", announce, nowUTC, formatAnnounceItem, formatAnnounceChangeItem)
+	}
+
 	return sb.String(), true
 }
 
-// FormatScenarioAndChampionsMessage formats Message 3: detailed diffs for
-// single_mode_scenario and champions_schedule. Returns ("", false) when both
-// tables have no differences.
+// FormatScenarioAndChampionsMessage formats Message 3 for single_mode_scenario
+// and champions_schedule diffs. Returns ("", false) when both have no differences.
 func FormatScenarioAndChampionsMessage(
 	scenario mdbdiff.ScenarioDiff,
 	champions mdbdiff.ChampionsDiff,
 	now time.Time,
 ) (string, bool) {
-	if scenario.IsEmpty() && champions.IsEmpty() {
+	return FormatScheduleMessage(scenario, champions, mdbdiff.StoryEventDiff{}, now)
+}
+
+// FormatScheduleMessage formats Message 3: detailed diffs ordered as
+// single_mode_scenario, champions_schedule, and story_event_data. Returns
+// ("", false) when all three tables have no differences.
+func FormatScheduleMessage(
+	scenario mdbdiff.ScenarioDiff,
+	champions mdbdiff.ChampionsDiff,
+	story mdbdiff.StoryEventDiff,
+	now time.Time,
+) (string, bool) {
+	if scenario.IsEmpty() && champions.IsEmpty() && story.IsEmpty() {
 		return "", false
 	}
 
@@ -106,6 +141,13 @@ func FormatScenarioAndChampionsMessage(
 			sb.WriteString("\n\n")
 		}
 		writeEntryDiffBlock(&sb, "champions_schedule changes", champions, nowUTC, formatChampionsItem, formatChampionsChangeItem)
+		wroteSection = true
+	}
+	if !story.IsEmpty() {
+		if wroteSection {
+			sb.WriteString("\n\n")
+		}
+		writeEntryDiffBlock(&sb, "story_event_data changes", story, nowUTC, formatStoryEventItem, formatStoryEventChangeItem)
 	}
 
 	return sb.String(), true
@@ -151,6 +193,24 @@ func formatCampaignItem(sb *strings.Builder, ev mdbdiff.CampaignEvent, nowUTC ti
 
 func formatCampaignChangeItem(sb *strings.Builder, ch mdbdiff.EntryChange[mdbdiff.CampaignEvent], nowUTC time.Time) {
 	writeEntityHeader(sb, ch.New.CampaignID, ch.Old.Title, ch.New.Title, ch.New.Description)
+	writeTimeLine(sb, "Start", "Starts", ch.Old.StartTime.UTC(), ch.New.StartTime.UTC(), nowUTC, true)
+	writeTimeLine(sb, "End", "Ends", ch.Old.EndTime.UTC(), ch.New.EndTime.UTC(), nowUTC, true)
+}
+
+func formatAnnounceItem(sb *strings.Builder, ev mdbdiff.AnnounceEvent, nowUTC time.Time, includeCountdown bool) {
+	writeEntityHeader(sb, ev.ID, "", ev.Title, "Type: "+ev.TypeLabel())
+	startUTC := ev.StartTime.UTC()
+	endUTC := ev.EndTime.UTC()
+	writeTimeLine(sb, "Start", "Starts", startUTC, startUTC, nowUTC, includeCountdown)
+	writeTimeLine(sb, "End", "Ends", endUTC, endUTC, nowUTC, includeCountdown)
+}
+
+func formatAnnounceChangeItem(sb *strings.Builder, ch mdbdiff.EntryChange[mdbdiff.AnnounceEvent], nowUTC time.Time) {
+	typeLine := "Type: " + ch.New.TypeLabel()
+	if ch.Old.AnnounceType != ch.New.AnnounceType {
+		typeLine = fmt.Sprintf("Type: %s -> %s", ch.Old.TypeLabel(), ch.New.TypeLabel())
+	}
+	writeEntityHeader(sb, ch.New.ID, ch.Old.Title, ch.New.Title, typeLine)
 	writeTimeLine(sb, "Start", "Starts", ch.Old.StartTime.UTC(), ch.New.StartTime.UTC(), nowUTC, true)
 	writeTimeLine(sb, "End", "Ends", ch.Old.EndTime.UTC(), ch.New.EndTime.UTC(), nowUTC, true)
 }
@@ -208,6 +268,20 @@ func formatChampionsChangeItem(sb *strings.Builder, ch mdbdiff.EntryChange[mdbdi
 		courseLine = "Course: " + ch.New.Course
 	}
 	writeEntityHeader(sb, ch.New.ID, ch.Old.Title, ch.New.Title, courseLine)
+	writeTimeLine(sb, "Start", "Starts", ch.Old.StartTime.UTC(), ch.New.StartTime.UTC(), nowUTC, true)
+	writeTimeLine(sb, "End", "Ends", ch.Old.EndTime.UTC(), ch.New.EndTime.UTC(), nowUTC, true)
+}
+
+func formatStoryEventItem(sb *strings.Builder, ev mdbdiff.StoryEvent, nowUTC time.Time, includeCountdown bool) {
+	writeEntityHeader(sb, ev.ID, "", ev.Title, "")
+	startUTC := ev.StartTime.UTC()
+	endUTC := ev.EndTime.UTC()
+	writeTimeLine(sb, "Start", "Starts", startUTC, startUTC, nowUTC, includeCountdown)
+	writeTimeLine(sb, "End", "Ends", endUTC, endUTC, nowUTC, includeCountdown)
+}
+
+func formatStoryEventChangeItem(sb *strings.Builder, ch mdbdiff.EntryChange[mdbdiff.StoryEvent], nowUTC time.Time) {
+	writeEntityHeader(sb, ch.New.ID, ch.Old.Title, ch.New.Title, "")
 	writeTimeLine(sb, "Start", "Starts", ch.Old.StartTime.UTC(), ch.New.StartTime.UTC(), nowUTC, true)
 	writeTimeLine(sb, "End", "Ends", ch.Old.EndTime.UTC(), ch.New.EndTime.UTC(), nowUTC, true)
 }

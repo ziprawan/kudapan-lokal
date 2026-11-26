@@ -33,12 +33,15 @@ func (d TableDiff) HasChanges() bool {
 }
 
 // DiffResult contains the full table diff summary and detailed diffs for
-// campaign_data, single_mode_scenario, and champions_schedule.
+// campaign_data, announce_data, single_mode_scenario, champions_schedule, and
+// story_event_data.
 type DiffResult struct {
-	Tables    []TableDiff
-	Campaign  CampaignDiff
-	Scenario  ScenarioDiff
-	Champions ChampionsDiff
+	Tables     []TableDiff
+	Campaign   CampaignDiff
+	Announce   AnnounceDiff
+	Scenario   ScenarioDiff
+	Champions  ChampionsDiff
+	StoryEvent StoryEventDiff
 }
 
 // HasTableChanges reports whether any table in master.mdb differed.
@@ -140,6 +143,10 @@ func DiffFiles(oldPath, newPath string) (*DiffResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("diff campaign_data: %w", err)
 	}
+	announceDiff, err := diffAnnounceData(oldDB, newDB)
+	if err != nil {
+		return nil, fmt.Errorf("diff announce_data: %w", err)
+	}
 	scenarioDiff, err := diffScenarioData(oldDB, newDB)
 	if err != nil {
 		return nil, fmt.Errorf("diff single_mode_scenario: %w", err)
@@ -148,12 +155,18 @@ func DiffFiles(oldPath, newPath string) (*DiffResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("diff champions_schedule: %w", err)
 	}
+	storyEventDiff, err := diffStoryEventData(oldDB, newDB)
+	if err != nil {
+		return nil, fmt.Errorf("diff story_event_data: %w", err)
+	}
 
 	return &DiffResult{
-		Tables:    tableDiffs,
-		Campaign:  campaignDiff,
-		Scenario:  scenarioDiff,
-		Champions: championsDiff,
+		Tables:     tableDiffs,
+		Campaign:   campaignDiff,
+		Announce:   announceDiff,
+		Scenario:   scenarioDiff,
+		Champions:  championsDiff,
+		StoryEvent: storyEventDiff,
 	}, nil
 }
 

@@ -11,6 +11,7 @@ import (
 const (
 	textCategoryRaceTrack     = 35
 	textCategoryScenarioTitle = 119
+	textCategoryStoryEvent    = 189
 	textCategoryChampionsCup  = 206
 )
 
@@ -66,6 +67,18 @@ type ChampionsScheduleEvent struct {
 
 // ChampionsDiff holds added, deleted, and changed champions_schedule rows.
 type ChampionsDiff = EntryDiff[ChampionsScheduleEvent]
+
+// StoryEvent represents a story_event_data record enriched with its title
+// (text_data category 189).
+type StoryEvent struct {
+	ID        int64
+	Title     string
+	StartTime time.Time
+	EndTime   time.Time
+}
+
+// StoryEventDiff holds added, deleted, and changed story_event_data rows.
+type StoryEventDiff = EntryDiff[StoryEvent]
 
 type entityRecord[T any] struct {
 	item   T
@@ -251,6 +264,12 @@ func diffChampionsScheduleData(oldDB, newDB *sql.DB) (ChampionsDiff, error) {
 	})
 }
 
+func diffStoryEventData(oldDB, newDB *sql.DB) (StoryEventDiff, error) {
+	return diffTableEntry(oldDB, newDB, "story_event_data", loadStoryEvents, func(ev StoryEvent) int64 {
+		return ev.ID
+	})
+}
+
 func loadScenarios(db *sql.DB) (map[int64]entityRecord[ScenarioEvent], error) {
 	texts, err := loadTextLookup(db, textCategoryScenarioTitle)
 	if err != nil {
@@ -404,4 +423,33 @@ func normalizeSingleLineTitle(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return strings.TrimSpace(s)
+}
+
+func loadStoryEvents(db *sql.DB) (map[int64]entityRecord[StoryEvent], error) {
+	texts, err := loadTextLookup(db, textCategoryStoryEvent)
+	if err != nil {
+		return nil, err
+	}
+	titles := texts[textCategoryStoryEvent]
+
+	return loadTableEntities(db, "story_event_data",
+		`SELECT * FROM story_event_data ORDER BY story_event_id ASC`,
+		func(vals []any, colIndex map[string]int) (int64, StoryEvent, error) {
+			id, ok := colInt64(vals, colIndex, "story_event_id")
+			if !ok {
+				id, ok = colInt64(vals, colIndex, "id")
+			}
+			if !ok {
+				return 0, StoryEvent{}, fmt.Errorf("story_event_data id missing or invalid")
+			}
+			startUnix, _ := colInt64(vals, colIndex, "start_date")
+			endUnix, _ := colInt64(vals, colIndex, "end_date")
+
+			return id, StoryEvent{
+				ID:        id,
+				Title:     normalizeSingleLineTitle(titles[id]),
+				StartTime: time.Unix(startUnix, 0).UTC(),
+				EndTime:   time.Unix(endUnix, 0).UTC(),
+			}, nil
+		})
 }

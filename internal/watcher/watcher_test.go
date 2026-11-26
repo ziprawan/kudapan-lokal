@@ -349,11 +349,99 @@ func TestWatcherThirdMessageForScenarioAndChampions(t *testing.T) {
 	if len(res.SentMessages) != 3 {
 		t.Fatalf("sent %d messages, want 3: %v", len(res.SentMessages), res.SentMessages)
 	}
-	if !strings.Contains(res.SentMessages[2], "single_mode_scenario changes") ||
-		!strings.Contains(res.SentMessages[2], "Grandmasters") ||
-		!strings.Contains(res.SentMessages[2], "champions_schedule changes") ||
-		!strings.Contains(res.SentMessages[2], "Pisces Cup") {
-		t.Errorf("unexpected third message:\n%s", res.SentMessages[2])
+	msg3 := res.SentMessages[2]
+	idxScenario := strings.Index(msg3, "single_mode_scenario changes")
+	idxChampions := strings.Index(msg3, "champions_schedule changes")
+	idxStory := strings.Index(msg3, "story_event_data changes")
+	if idxScenario < 0 || idxChampions <= idxScenario || idxStory <= idxChampions ||
+		!strings.Contains(msg3, "Grandmasters") ||
+		!strings.Contains(msg3, "Pisces Cup") ||
+		!strings.Contains(msg3, "Leap into a New World!") {
+		t.Errorf("unexpected third message:\n%s", msg3)
+	}
+}
+
+func TestWatcherSecondMessageIncludesAnnounceData(t *testing.T) {
+	dir := t.TempDir()
+	store, err := savedata.LoadOrInit(filepath.Join(dir, "savedata.json"))
+	if err != nil {
+		t.Fatalf("LoadOrInit() error = %v", err)
+	}
+
+	seedDB := filepath.Join(dir, "seed.mdb")
+	newDB := filepath.Join(dir, "server_v2.mdb")
+	now := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+
+	createWatcherTestDB(t, seedDB, false)
+	createWatcherTestDB(t, newDB, true)
+	addAnnounceDiffTestTables(t, seedDB, false, now)
+	addAnnounceDiffTestTables(t, newDB, true, now)
+
+	fetcher := &fakeFetcher{resVer: "10008810", srcDB: newDB}
+	notifier := &fakeNotifier{}
+	cfg := Config{
+		StatePath:        filepath.Join(dir, "state.json"),
+		MasterDBPath:     filepath.Join(dir, "master.mdb"),
+		SeedMasterDBPath: seedDB,
+		Interval:         time.Hour,
+	}
+	svc, err := New(cfg, store, fetcher, notifier, WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	res, err := svc.RunOnce(context.Background())
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if len(res.SentMessages) != 2 {
+		t.Fatalf("sent %d messages, want 2: %v", len(res.SentMessages), res.SentMessages)
+	}
+	msg2 := res.SentMessages[1]
+	for _, want := range []string{
+		"campaign_data changes",
+		"Winter Campaign",
+		"announce_data changes",
+		"[Beyond the Horizon] Tokai Teio",
+		"Type: Character",
+		"[Fire at My Heels] Kitasan Black",
+		"Type: Support Card",
+	} {
+		if !strings.Contains(msg2, want) {
+			t.Errorf("second message missing %q:\n%s", want, msg2)
+		}
+	}
+}
+
+func addAnnounceDiffTestTables(t *testing.T, path string, isNew bool, now time.Time) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer db.Close()
+
+	stmts := []string{
+		`CREATE TABLE announce_data (id INTEGER PRIMARY KEY, announce_type INTEGER NOT NULL, announce_id INTEGER NOT NULL, priority INTEGER NOT NULL, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL)`,
+		`CREATE TABLE announce_character (id INTEGER PRIMARY KEY, movie_id INTEGER NOT NULL, can_end_second INTEGER NOT NULL)`,
+		`CREATE TABLE announce_support_card (id INTEGER PRIMARY KEY, type INTEGER NOT NULL, cuts_pattern INTEGER NOT NULL, support_card_id_a INTEGER NOT NULL, support_card_id_b INTEGER NOT NULL, support_card_id_c INTEGER NOT NULL)`,
+		`CREATE TABLE gacha_available (gacha_id INTEGER NOT NULL, card_id INTEGER NOT NULL, card_type INTEGER NOT NULL, rarity INTEGER NOT NULL, odds INTEGER NOT NULL, is_pickup INTEGER NOT NULL, recommend_order INTEGER NOT NULL, is_prize_selectable INTEGER NOT NULL, PRIMARY KEY(gacha_id, card_id))`,
+	}
+	if isNew {
+		start := now.Add(24 * time.Hour).Unix()
+		end := now.Add(10 * 24 * time.Hour).Unix()
+		stmts = append(stmts,
+			`INSERT INTO text_data VALUES (4, 4, 100302, '[Beyond the Horizon] Tokai Teio'), (75, 75, 30028, '[Fire at My Heels] Kitasan Black')`,
+			`INSERT INTO announce_character VALUES (104, 30010, 11800)`,
+			`INSERT INTO announce_support_card VALUES (504, 3, 2, 30028, 0, 0)`,
+			`INSERT INTO gacha_available VALUES (30010, 100302, 1, 3, 75000, 1, 1, 0)`,
+			`INSERT INTO announce_data VALUES (30010, 1, 104, 1, `+itoa(start)+`, `+itoa(end)+`), (30011, 2, 504, 1, `+itoa(start)+`, `+itoa(end)+`)`,
+		)
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("exec %q: %v", s, err)
+		}
 	}
 }
 
@@ -368,16 +456,19 @@ func addScheduleDiffTestTables(t *testing.T, path string, isNew bool) {
 	stmts := []string{
 		`CREATE TABLE single_mode_scenario (id INTEGER PRIMARY KEY, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL, max_speed INTEGER NOT NULL, max_stamina INTEGER NOT NULL, max_pow INTEGER NOT NULL, max_guts INTEGER NOT NULL, max_wiz INTEGER NOT NULL)`,
 		`CREATE TABLE champions_schedule (id INTEGER PRIMARY KEY, resource_id INTEGER NOT NULL, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL)`,
+		`CREATE TABLE story_event_data (story_event_id INTEGER PRIMARY KEY, announce_id INTEGER NOT NULL, consume_tp_ratio INTEGER NOT NULL, bonus_reward_ratio INTEGER NOT NULL, notice_date INTEGER NOT NULL, start_date INTEGER NOT NULL, middle_date_01 INTEGER NOT NULL, middle_date_02 INTEGER NOT NULL, ending_date INTEGER NOT NULL, end_date INTEGER NOT NULL)`,
 		`INSERT INTO single_mode_scenario VALUES (1, 1700000000, 1800000000, 200, 200, 200, 200, 200)`,
 		`INSERT INTO champions_schedule VALUES (22, 2, 1794952800, 1795816799)`,
+		`INSERT INTO story_event_data VALUES (1022, 22, 100, 100, 1793916000, 1794261600, 1794600000, 1795000000, 1795471199, 1795730399)`,
 	}
 	if isNew {
 		start := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC).Unix()
 		end := time.Date(2026, 12, 2, 0, 0, 0, 0, time.UTC).Unix()
 		stmts = append(stmts,
-			`INSERT INTO text_data VALUES (119, 119, 5, 'Grandmasters'), (206, 206, 23, 'Pisces Cup')`,
+			`INSERT INTO text_data VALUES (119, 119, 5, 'Grandmasters'), (206, 206, 23, 'Pisces Cup'), (189, 189, 1023, 'Leap into a New World!')`,
 			`INSERT INTO single_mode_scenario VALUES (5, `+itoa(start)+`, 2524608000, 300, 300, 300, 300, 400)`,
 			`INSERT INTO champions_schedule VALUES (23, 3, `+itoa(start)+`, `+itoa(end)+`)`,
+			`INSERT INTO story_event_data VALUES (1023, 23, 100, 100, `+itoa(start)+`, `+itoa(start)+`, `+itoa(start)+`, `+itoa(start)+`, `+itoa(end)+`, `+itoa(end)+`)`,
 		)
 	}
 	for _, s := range stmts {

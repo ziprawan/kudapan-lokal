@@ -228,6 +228,90 @@ func TestFormatScenarioAndChampionsMessage(t *testing.T) {
 	if !ok || !strings.Contains(msgBoth, "single_mode_scenario changes") || !strings.Contains(msgBoth, "champions_schedule changes") {
 		t.Errorf("expected both sections when both differ:\n%s", msgBoth)
 	}
+
+	storyOnly := mdbdiff.StoryEventDiff{
+		Added: []mdbdiff.StoryEvent{
+			{
+				ID:        1023,
+				Title:     "Leap into a New World!",
+				StartTime: now.Add(3 * 24 * time.Hour),
+				EndTime:   now.Add(15 * 24 * time.Hour),
+			},
+		},
+	}
+	msgAllThree, ok := FormatScheduleMessage(scenarioOnly, championsOnly, storyOnly, now)
+	if !ok {
+		t.Fatal("expected ok=true when all three sections differ")
+	}
+	idxScenario := strings.Index(msgAllThree, "single_mode_scenario changes")
+	idxChampions := strings.Index(msgAllThree, "champions_schedule changes")
+	idxStory := strings.Index(msgAllThree, "story_event_data changes")
+	if idxScenario < 0 || idxChampions <= idxScenario || idxStory <= idxChampions {
+		t.Errorf("unexpected section order (scenario=%d, champions=%d, story=%d):\n%s",
+			idxScenario, idxChampions, idxStory, msgAllThree)
+	}
+	if !strings.Contains(msgAllThree, "#1023 Leap into a New World!") {
+		t.Errorf("missing story_event_data title:\n%s", msgAllThree)
+	}
+}
+
+func TestFormatCampaignAndAnnounceMessage(t *testing.T) {
+	now := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+
+	if msg, ok := FormatCampaignAndAnnounceMessage(mdbdiff.CampaignDiff{}, mdbdiff.AnnounceDiff{}, now); ok || msg != "" {
+		t.Fatalf("expected empty diff to return (\"\", false), got (%q, %v)", msg, ok)
+	}
+
+	announce := mdbdiff.AnnounceDiff{
+		Added: []mdbdiff.AnnounceEvent{
+			{
+				ID:           30010,
+				AnnounceType: mdbdiff.AnnounceTypeCharacter,
+				AnnounceID:   104,
+				Title:        "[Beyond the Horizon] Tokai Teio, [End of the Skies] Mejiro McQueen",
+				StartTime:    now.Add(24 * time.Hour),
+				EndTime:      now.Add(10 * 24 * time.Hour),
+			},
+			{
+				ID:           30011,
+				AnnounceType: mdbdiff.AnnounceTypeSupportCard,
+				AnnounceID:   504,
+				Title:        "[Fire at My Heels] Kitasan Black, [The Will to Overtake] Satono Diamond",
+				StartTime:    now.Add(24 * time.Hour),
+				EndTime:      now.Add(10 * 24 * time.Hour),
+			},
+		},
+	}
+
+	msgAnnounceOnly, ok := FormatCampaignAndAnnounceMessage(mdbdiff.CampaignDiff{}, announce, now)
+	if !ok {
+		t.Fatal("expected ok=true for announce-only diff")
+	}
+	if strings.Contains(msgAnnounceOnly, "campaign_data changes") || !strings.Contains(msgAnnounceOnly, "announce_data changes") {
+		t.Errorf("unexpected headings:\n%s", msgAnnounceOnly)
+	}
+	if !strings.Contains(msgAnnounceOnly, "#30010 [Beyond the Horizon] Tokai Teio, [End of the Skies] Mejiro McQueen") ||
+		!strings.Contains(msgAnnounceOnly, "Type: Character") ||
+		!strings.Contains(msgAnnounceOnly, "Type: Support Card") ||
+		!strings.Contains(msgAnnounceOnly, "Starts: 2026-11-23 00:00:00 UTC (in 1 day 0 hours)") {
+		t.Errorf("unexpected announce-only body:\n%s", msgAnnounceOnly)
+	}
+
+	campaign := mdbdiff.CampaignDiff{
+		Added: []mdbdiff.CampaignEvent{
+			{
+				CampaignID:  10,
+				Title:       "Double Drops",
+				Description: "2x rewards",
+				StartTime:   now.Add(2 * time.Hour),
+				EndTime:     now.Add(48 * time.Hour),
+			},
+		},
+	}
+	msgBoth, ok := FormatCampaignAndAnnounceMessage(campaign, announce, now)
+	if !ok || !strings.Contains(msgBoth, "campaign_data changes") || !strings.Contains(msgBoth, "announce_data changes") {
+		t.Errorf("expected both campaign_data and announce_data sections:\n%s", msgBoth)
+	}
 }
 
 func TestSplitMessageAndTelegramSend(t *testing.T) {

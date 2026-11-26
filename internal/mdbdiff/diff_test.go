@@ -122,7 +122,7 @@ func TestDiffFilesIdenticalShortCircuits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiffFiles() error = %v", err)
 	}
-	if res.HasTableChanges() || !res.Campaign.IsEmpty() || !res.Scenario.IsEmpty() || !res.Champions.IsEmpty() {
+	if res.HasTableChanges() || !res.Campaign.IsEmpty() || !res.Announce.IsEmpty() || !res.Scenario.IsEmpty() || !res.Champions.IsEmpty() || !res.StoryEvent.IsEmpty() {
 		t.Fatalf("expected empty diff for identical files, got %+v", res)
 	}
 }
@@ -206,6 +206,124 @@ func TestDiffScenarioAndChampionsSchedule(t *testing.T) {
 	}
 	if len(res.Champions.Changed) != 1 || res.Champions.Changed[0].New.ID != 21 || res.Champions.Changed[0].New.Course != "Chukyo Turf 1200m" {
 		t.Fatalf("unexpected Champions.Changed: %+v", res.Champions.Changed)
+	}
+}
+
+func TestDiffAnnounceData(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.mdb")
+	newPath := filepath.Join(dir, "new.mdb")
+
+	schema := []string{
+		`CREATE TABLE text_data (id INTEGER NOT NULL, category INTEGER NOT NULL, "index" INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(category, "index"))`,
+		`CREATE TABLE announce_data (id INTEGER PRIMARY KEY, announce_type INTEGER NOT NULL, announce_id INTEGER NOT NULL, priority INTEGER NOT NULL, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL)`,
+		`CREATE TABLE announce_character (id INTEGER PRIMARY KEY, movie_id INTEGER NOT NULL, can_end_second INTEGER NOT NULL)`,
+		`CREATE TABLE announce_support_card (id INTEGER PRIMARY KEY, type INTEGER NOT NULL, cuts_pattern INTEGER NOT NULL, support_card_id_a INTEGER NOT NULL, support_card_id_b INTEGER NOT NULL, support_card_id_c INTEGER NOT NULL)`,
+		`CREATE TABLE gacha_available (gacha_id INTEGER NOT NULL, card_id INTEGER NOT NULL, card_type INTEGER NOT NULL, rarity INTEGER NOT NULL, odds INTEGER NOT NULL, is_pickup INTEGER NOT NULL, recommend_order INTEGER NOT NULL, is_prize_selectable INTEGER NOT NULL, PRIMARY KEY(gacha_id, card_id))`,
+	}
+
+	createTestDB(t, oldPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(4, 4, 101501, '[O Sole Suo!] T.M. Opera O'),
+			(75, 75, 30024, '[Get Lots of Hugs for Me] Oguri Cap'),
+			(75, 75, 20023, '[Lamplit Training of a Witch-to-Be] Sweep Tosho')`,
+		`INSERT INTO announce_character VALUES (101, 30004, 6000)`,
+		`INSERT INTO announce_support_card VALUES (501, 1, 2, 30024, 20023, 0)`,
+		`INSERT INTO gacha_available VALUES (30004, 101501, 1, 3, 75000, 1, 1, 0)`,
+		`INSERT INTO announce_data VALUES
+			(30004, 1, 101, 1, 1750897800, 1751493599),
+			(30005, 2, 501, 1, 1750897800, 1751493599)`,
+	})
+
+	createTestDB(t, newPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(4, 4, 101501, '[O Sole Suo!] T.M. Opera O'),
+			(4, 4, 100302, '[Beyond the Horizon] Tokai Teio'),
+			(4, 4, 101302, '[End of the Skies] Mejiro McQueen'),
+			(75, 75, 30028, '[Fire at My Heels] Kitasan Black'),
+			(75, 75, 30029, '[The Will to Overtake] Satono Diamond')`,
+		`INSERT INTO announce_character VALUES (101, 30004, 6000), (104, 30010, 11800)`,
+		`INSERT INTO announce_support_card VALUES (504, 3, 2, 30028, 30029, 0)`,
+		`INSERT INTO gacha_available VALUES
+			(30004, 101501, 1, 3, 75000, 1, 1, 0),
+			(30010, 101302, 1, 3, 75000, 1, 2, 0),
+			(30010, 100302, 1, 3, 75000, 1, 1, 0),
+			(30010, 100101, 1, 3, 10000, 0, 0, 0)`,
+		`INSERT INTO announce_data VALUES
+			(30004, 1, 101, 1, 1750897800, 1751580000),
+			(30010, 1, 104, 1, 1752703200, 1754085599),
+			(30011, 2, 504, 1, 1752703200, 1754085599)`,
+	})
+
+	res, err := DiffFiles(oldPath, newPath)
+	if err != nil {
+		t.Fatalf("DiffFiles() error = %v", err)
+	}
+
+	if len(res.Announce.Added) != 2 {
+		t.Fatalf("Announce.Added count = %d (%+v), want 2", len(res.Announce.Added), res.Announce.Added)
+	}
+	if res.Announce.Added[0].ID != 30010 || res.Announce.Added[0].AnnounceType != AnnounceTypeCharacter ||
+		res.Announce.Added[0].Title != "[Beyond the Horizon] Tokai Teio, [End of the Skies] Mejiro McQueen" {
+		t.Errorf("unexpected added character announce: %+v", res.Announce.Added[0])
+	}
+	if res.Announce.Added[1].ID != 30011 || res.Announce.Added[1].AnnounceType != AnnounceTypeSupportCard ||
+		res.Announce.Added[1].Title != "[Fire at My Heels] Kitasan Black, [The Will to Overtake] Satono Diamond" {
+		t.Errorf("unexpected added support announce: %+v", res.Announce.Added[1])
+	}
+
+	if len(res.Announce.Deleted) != 1 || res.Announce.Deleted[0].ID != 30005 ||
+		res.Announce.Deleted[0].Title != "[Get Lots of Hugs for Me] Oguri Cap, [Lamplit Training of a Witch-to-Be] Sweep Tosho" {
+		t.Errorf("unexpected deleted announce: %+v", res.Announce.Deleted)
+	}
+
+	if len(res.Announce.Changed) != 1 || res.Announce.Changed[0].New.ID != 30004 ||
+		res.Announce.Changed[0].New.Title != "[O Sole Suo!] T.M. Opera O" ||
+		res.Announce.Changed[0].New.EndTime.Unix() != 1751580000 {
+		t.Errorf("unexpected changed announce: %+v", res.Announce.Changed)
+	}
+}
+
+func TestDiffStoryEventData(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old.mdb")
+	newPath := filepath.Join(dir, "new.mdb")
+
+	schema := []string{
+		`CREATE TABLE text_data (id INTEGER NOT NULL, category INTEGER NOT NULL, "index" INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(category, "index"))`,
+		`CREATE TABLE story_event_data (story_event_id INTEGER PRIMARY KEY, announce_id INTEGER NOT NULL, consume_tp_ratio INTEGER NOT NULL, bonus_reward_ratio INTEGER NOT NULL, notice_date INTEGER NOT NULL, start_date INTEGER NOT NULL, middle_date_01 INTEGER NOT NULL, middle_date_02 INTEGER NOT NULL, ending_date INTEGER NOT NULL, end_date INTEGER NOT NULL)`,
+	}
+
+	createTestDB(t, oldPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(189, 189, 1020, 'Illuminate the Heart'),
+			(189, 189, 1021, 'Old Deleted Story')`,
+		`INSERT INTO story_event_data VALUES
+			(1020, 10, 100, 100, 1790287200, 1790632800, 1791000000, 1791400000, 1791842399, 1792101599),
+			(1021, 11, 100, 100, 1792188000, 1792533600, 1792800000, 1793200000, 1793570399, 1793829599)`,
+	})
+
+	createTestDB(t, newPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(189, 189, 1020, 'Illuminate the Heart'),
+			(189, 189, 1023, 'Leap into a New World!')`,
+		`INSERT INTO story_event_data VALUES
+			(1020, 10, 100, 100, 1790287200, 1790632800, 1791000000, 1791400000, 1791842399, 1792200000),
+			(1023, 13, 100, 100, 1795816800, 1796162400, 1796500000, 1796900000, 1797371999, 1797631199)`,
+	})
+
+	res, err := DiffFiles(oldPath, newPath)
+	if err != nil {
+		t.Fatalf("DiffFiles() error = %v", err)
+	}
+	if len(res.StoryEvent.Added) != 1 || res.StoryEvent.Added[0].ID != 1023 || res.StoryEvent.Added[0].Title != "Leap into a New World!" {
+		t.Fatalf("unexpected StoryEvent.Added: %+v", res.StoryEvent.Added)
+	}
+	if len(res.StoryEvent.Deleted) != 1 || res.StoryEvent.Deleted[0].ID != 1021 || res.StoryEvent.Deleted[0].Title != "Old Deleted Story" {
+		t.Fatalf("unexpected StoryEvent.Deleted: %+v", res.StoryEvent.Deleted)
+	}
+	if len(res.StoryEvent.Changed) != 1 || res.StoryEvent.Changed[0].New.ID != 1020 || res.StoryEvent.Changed[0].New.EndTime.Unix() != 1792200000 {
+		t.Fatalf("unexpected StoryEvent.Changed: %+v", res.StoryEvent.Changed)
 	}
 }
 

@@ -300,11 +300,13 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("diff master.mdb: %w", err)
 	}
-	s.logger.Printf("[check] diff complete: %d table(s) changed, campaign_data (+%d / -%d / ~%d), single_mode_scenario (+%d / -%d / ~%d), champions_schedule (+%d / -%d / ~%d)",
+	s.logger.Printf("[check] diff complete: %d table(s) changed, campaign_data (+%d / -%d / ~%d), announce_data (+%d / -%d / ~%d), single_mode_scenario (+%d / -%d / ~%d), champions_schedule (+%d / -%d / ~%d), story_event_data (+%d / -%d / ~%d)",
 		len(diff.Tables),
 		len(diff.Campaign.Added), len(diff.Campaign.Deleted), len(diff.Campaign.Changed),
+		len(diff.Announce.Added), len(diff.Announce.Deleted), len(diff.Announce.Changed),
 		len(diff.Scenario.Added), len(diff.Scenario.Deleted), len(diff.Scenario.Changed),
-		len(diff.Champions.Added), len(diff.Champions.Deleted), len(diff.Champions.Changed))
+		len(diff.Champions.Added), len(diff.Champions.Deleted), len(diff.Champions.Changed),
+		len(diff.StoryEvent.Added), len(diff.StoryEvent.Deleted), len(diff.StoryEvent.Changed))
 	if s.cfg.Verbose {
 		for _, td := range diff.Tables {
 			s.logger.Printf("[check]   table %s: +%d / -%d / ~%d", td.Table, td.Added, td.Deleted, td.Changed)
@@ -332,12 +334,12 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 		return nil
 	}
 
-	campaignMsg, campaignOK := notify.FormatCampaignDiffMessage(diff.Campaign, checkedAt)
-	if err := sendOptional("active campaign_data", campaignMsg, campaignOK); err != nil {
+	campaignMsg, campaignOK := notify.FormatCampaignAndAnnounceMessage(diff.Campaign, diff.Announce, checkedAt)
+	if err := sendOptional("active campaign_data/announce_data", campaignMsg, campaignOK); err != nil {
 		return nil, err
 	}
 
-	scheduleMsg, scheduleOK := notify.FormatScenarioAndChampionsMessage(diff.Scenario, diff.Champions, checkedAt)
+	scheduleMsg, scheduleOK := notify.FormatScheduleMessage(diff.Scenario, diff.Champions, diff.StoryEvent, checkedAt)
 	if err := sendOptional("single_mode_scenario/champions_schedule", scheduleMsg, scheduleOK); err != nil {
 		return nil, err
 	}
