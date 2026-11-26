@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"log"
 	"net/http"
@@ -13,6 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"kudapan_lokal/internal/discordbot"
+	"kudapan_lokal/internal/webhook"
 )
 
 func TestLoadDotEnv(t *testing.T) {
@@ -157,7 +161,7 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 	}
 
 	// Empty ListenAddr disables server creation cleanly.
-	disabledSrv, err := buildWebhookServer(webhookConfig{}, stdoutNotifier{}, log.New(io.Discard, "", 0))
+	disabledSrv, err := buildWebhookServer(webhookConfig{}, stdoutNotifier{}, nil, nil, "", log.New(io.Discard, "", 0))
 	if err != nil || disabledSrv != nil {
 		t.Fatalf("expected (nil, nil) for disabled webhook server, got (%v, %v)", disabledSrv, err)
 	}
@@ -166,7 +170,7 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 	if _, err := buildWebhookServer(webhookConfig{
 		ListenAddr:       "127.0.0.1:0",
 		DiscordPublicKey: "invalid-hex",
-	}, stdoutNotifier{}, log.New(io.Discard, "", 0)); err == nil {
+	}, stdoutNotifier{}, nil, nil, "", log.New(io.Discard, "", 0)); err == nil {
 		t.Fatal("expected error for invalid DISCORD_PUBLIC_KEY")
 	}
 
@@ -174,7 +178,7 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 	noDiscordSrv, err := buildWebhookServer(webhookConfig{
 		ListenAddr:            "127.0.0.1:0",
 		TelegramWebhookSecret: cfg.TelegramWebhookSecret,
-	}, stdoutNotifier{}, log.New(io.Discard, "", 0))
+	}, stdoutNotifier{}, nil, nil, "", log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("buildWebhookServer(no discord) error = %v", err)
 	}
@@ -184,8 +188,14 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 		t.Fatalf("expected 503 when DISCORD_PUBLIC_KEY omitted, got %d", rec503.Code)
 	}
 
-	// Full wiring serves both /api/webhook/telegram and /api/webhook/discord.
-	fullSrv, err := buildWebhookServer(cfg, stdoutNotifier{}, log.New(io.Discard, "", 0))
+	// Full wiring with discordbot.Store serves /api/webhook/telegram, /api/webhook/discord, and /notify-channel.
+	dcStore, err := discordbot.OpenStore(filepath.Join(dir, "discord.db"))
+	if err != nil {
+		t.Fatalf("discordbot.OpenStore() error = %v", err)
+	}
+	defer dcStore.Close()
+
+	fullSrv, err := buildWebhookServer(cfg, stdoutNotifier{}, dcStore, nil, "", log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("buildWebhookServer(full) error = %v", err)
 	}
@@ -207,5 +217,20 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 	fullSrv.Handler().ServeHTTP(dcRec, dcReq)
 	if dcRec.Code != http.StatusOK || !strings.Contains(dcRec.Body.String(), `"type":1`) {
 		t.Fatalf("POST /api/webhook/discord status=%d body=%s", dcRec.Code, dcRec.Body.String())
+	}
+
+	notifyBody := []byte(`{"id":"ix1","type":2,"guild_id":"guild-1","member":{"permissions":"8"},"data":{"name":"notify-channel","options":[{"name":"channel","type":7,"value":"chan-99"}]}}`)
+	notifySig := hex.EncodeToString(ed25519.Sign(priv, append([]byte(ts), notifyBody...)))
+	notifyReq := httptest.NewRequest(http.MethodPost, "/api/webhook/discord", bytes.NewReader(notifyBody))
+	notifyReq.Header.Set("X-Signature-Ed25519", notifySig)
+	notifyReq.Header.Set("X-Signature-Timestamp", ts)
+	notifyRec := httptest.NewRecorder()
+	fullSrv.Handler().ServeHTTP(notifyRec, notifyReq)
+	var notifyResp webhook.DiscordInteractionResponse
+	if err := json.Unmarshal(notifyRec.Body.Bytes(), &notifyResp); err != nil {
+		t.Fatalf("unmarshal /notify-channel response: %v (body=%s)", err, notifyRec.Body.String())
+	}
+	if notifyRec.Code != http.StatusOK || notifyResp.Data == nil || !strings.Contains(notifyResp.Data.Content, "<#chan-99>") {
+		t.Fatalf("POST /notify-channel status=%d body=%s", notifyRec.Code, notifyRec.Body.String())
 	}
 }

@@ -27,19 +27,77 @@ const (
 
 // DiscordInteraction represents a subset of a Discord HTTP interaction payload.
 type DiscordInteraction struct {
-	ID            string                  `json:"id"`
-	ApplicationID string                  `json:"application_id"`
-	Type          int                     `json:"type"`
-	Token         string                  `json:"token,omitempty"`
-	Version       int                     `json:"version,omitempty"`
-	Data          *DiscordInteractionData `json:"data,omitempty"`
+	ID             string                    `json:"id"`
+	ApplicationID  string                    `json:"application_id"`
+	Type           int                       `json:"type"`
+	GuildID        string                    `json:"guild_id,omitempty"`
+	ChannelID      string                    `json:"channel_id,omitempty"`
+	AppPermissions string                    `json:"app_permissions,omitempty"`
+	Member         *DiscordInteractionMember `json:"member,omitempty"`
+	Token          string                    `json:"token,omitempty"`
+	Version        int                       `json:"version,omitempty"`
+	Data           *DiscordInteractionData   `json:"data,omitempty"`
+}
+
+// DiscordInteractionMember represents the invoking guild member metadata.
+type DiscordInteractionMember struct {
+	Permissions string   `json:"permissions,omitempty"`
+	Roles       []string `json:"roles,omitempty"`
 }
 
 // DiscordInteractionData contains invoked application command metadata.
 type DiscordInteractionData struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type int    `json:"type,omitempty"`
+	ID       string                      `json:"id"`
+	Name     string                      `json:"name"`
+	Type     int                         `json:"type,omitempty"`
+	Options  []DiscordInteractionOption  `json:"options,omitempty"`
+	Resolved *DiscordInteractionResolved `json:"resolved,omitempty"`
+}
+
+// DiscordInteractionOption represents a slash command option passed by Discord.
+type DiscordInteractionOption struct {
+	Name  string `json:"name"`
+	Type  int    `json:"type"`
+	Value any    `json:"value,omitempty"`
+}
+
+// DiscordInteractionResolved contains resolved Discord entities referenced by options.
+type DiscordInteractionResolved struct {
+	Roles    map[string]DiscordResolvedRole    `json:"roles,omitempty"`
+	Channels map[string]DiscordResolvedChannel `json:"channels,omitempty"`
+}
+
+// DiscordResolvedRole represents a resolved Discord role in an interaction payload.
+type DiscordResolvedRole struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Permissions string `json:"permissions,omitempty"`
+	Mentionable bool   `json:"mentionable"`
+}
+
+// DiscordResolvedChannel represents a resolved Discord channel in an interaction payload.
+type DiscordResolvedChannel struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Type        int    `json:"type"`
+	Permissions string `json:"permissions,omitempty"`
+}
+
+// StringOption looks up a string-valued slash command option (including
+// string, channel, role, and user IDs) by name.
+func (d *DiscordInteractionData) StringOption(name string) (string, bool) {
+	if d == nil {
+		return "", false
+	}
+	for _, opt := range d.Options {
+		if opt.Name != name {
+			continue
+		}
+		if s, ok := opt.Value.(string); ok {
+			return s, true
+		}
+	}
+	return "", false
 }
 
 // DiscordInteractionResponse is returned synchronously by an HTTP interactions endpoint.

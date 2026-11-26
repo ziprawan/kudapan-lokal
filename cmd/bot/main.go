@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"kudapan_lokal/internal/discordbot"
 	"kudapan_lokal/internal/masterdb"
 	"kudapan_lokal/internal/notify"
 	"kudapan_lokal/internal/savedata"
@@ -50,12 +51,22 @@ func (stdoutNotifier) SendMessageToChat(_ context.Context, chatID, text string) 
 	return nil
 }
 
+type stdoutDiscordSender struct{}
+
+func (stdoutDiscordSender) SendChannelMessage(_ context.Context, channelID, content, roleID string) error {
+	fmt.Printf("----- DISCORD MESSAGE (channel_id=%s, role_id=%s) -----\n", channelID, roleID)
+	fmt.Println(content)
+	fmt.Println("---------------------------------------------------------")
+	return nil
+}
+
 type webhookConfig struct {
 	ListenAddr            string
 	TelegramWebhookSecret string
 	DiscordPublicKey      string
 	DiscordAppID          string
 	DiscordBotToken       string
+	DiscordDBPath         string
 }
 
 func resolveFlagOrEnv(flagVal, envKey string) string {
@@ -65,7 +76,14 @@ func resolveFlagOrEnv(flagVal, envKey string) string {
 	return strings.TrimSpace(os.Getenv(envKey))
 }
 
-func buildWebhookServer(cfg webhookConfig, sender webhook.ChatSender, logger *log.Logger) (*webhook.Server, error) {
+func buildWebhookServer(
+	cfg webhookConfig,
+	sender webhook.ChatSender,
+	dcStore *discordbot.Store,
+	dcVerifier discordbot.PermissionVerifier,
+	masterDBPath string,
+	logger *log.Logger,
+) (*webhook.Server, error) {
 	listenAddr := strings.TrimSpace(cfg.ListenAddr)
 	if listenAddr == "" {
 		return nil, nil
@@ -88,6 +106,9 @@ func buildWebhookServer(cfg webhookConfig, sender webhook.ChatSender, logger *lo
 		})
 		if err != nil {
 			return nil, err
+		}
+		if dcStore != nil {
+			discordbot.RegisterCommands(h, dcStore, dcVerifier, masterDBPath, time.Now)
 		}
 		dcHandler = h
 	} else {
@@ -117,6 +138,7 @@ func main() {
 		discordPublicKey      = flag.String("discord-public-key", "", "Discord application Ed25519 public key (hex) for /api/webhook/discord (overrides DISCORD_PUBLIC_KEY)")
 		discordAppID          = flag.String("discord-app-id", "", "Optional Discord application ID (overrides DISCORD_APP_ID)")
 		discordBotToken       = flag.String("discord-bot-token", "", "Optional Discord bot token (overrides DISCORD_BOT_TOKEN)")
+		discordDBPath         = flag.String("discord-db", "", "Path to Discord bot SQLite database (defaults to data/discord.db; overrides DISCORD_DB_PATH)")
 		savedataPath          = flag.String("savedata", savedata.DefaultFilePath, "Path to savedata.json")
 		statePath             = flag.String("state", watcher.DefaultStatePath, "Path to watcher state.json")
 		dbPath                = flag.String("db", watcher.DefaultMasterDBPath, "Path to cached baseline master.mdb")
@@ -155,17 +177,22 @@ func main() {
 
 	resolvedToken := resolveFlagOrEnv(*token, "TELEGRAM_BOT_TOKEN")
 	resolvedChatID := resolveFlagOrEnv(*chatID, "TELEGRAM_CHAT_ID")
+	resolvedDiscordDB := resolveFlagOrEnv(*discordDBPath, "DISCORD_DB_PATH")
+	if resolvedDiscordDB == "" {
+		resolvedDiscordDB = discordbot.DefaultDBPath
+	}
 	whCfg := webhookConfig{
 		ListenAddr:            resolveFlagOrEnv(*listenAddr, "WEBHOOK_LISTEN_ADDR"),
 		TelegramWebhookSecret: resolveFlagOrEnv(*telegramWebhookSecret, "TELEGRAM_WEBHOOK_SECRET"),
 		DiscordPublicKey:      resolveFlagOrEnv(*discordPublicKey, "DISCORD_PUBLIC_KEY"),
 		DiscordAppID:          resolveFlagOrEnv(*discordAppID, "DISCORD_APP_ID"),
 		DiscordBotToken:       resolveFlagOrEnv(*discordBotToken, "DISCORD_BOT_TOKEN"),
+		DiscordDBPath:         resolvedDiscordDB,
 	}
 
 	logger.Printf(
-		"starting kudapan_lokal bot (env=%q loaded=%v, savedata=%q, state=%q, db=%q, seed=%q, interval=%s, once=%v, dry_run=%v, verbose=%v, log_file=%q, webhook_listen=%q)",
-		*envPath, envLoaded, *savedataPath, *statePath, *dbPath, *seedDBPath, *interval, *once, *dryRun, *verbose, *logFilePath, whCfg.ListenAddr,
+		"starting kudapan_lokal bot (env=%q loaded=%v, savedata=%q, state=%q, db=%q, discord_db=%q, seed=%q, interval=%s, once=%v, dry_run=%v, verbose=%v, log_file=%q, webhook_listen=%q)",
+		*envPath, envLoaded, *savedataPath, *statePath, *dbPath, whCfg.DiscordDBPath, *seedDBPath, *interval, *once, *dryRun, *verbose, *logFilePath, whCfg.ListenAddr,
 	)
 
 	store, err := savedata.LoadOrInit(*savedataPath)
@@ -235,24 +262,69 @@ func main() {
 		return
 	}
 
-	webhookSrv, err := buildWebhookServer(whCfg, chatSender, logger)
-	if err != nil {
-		logger.Fatalf("init webhook server: %v", err)
+	var (
+		dcStore    *discordbot.Store
+		dcClient   *discordbot.Client
+		dcVerifier discordbot.PermissionVerifier
+		dcSender   discordbot.MessageSender
+		dcSched    *discordbot.Scheduler
+	)
+	discordEnabled := whCfg.DiscordPublicKey != "" || (whCfg.DiscordAppID != "" && whCfg.DiscordBotToken != "")
+	if discordEnabled {
+		dcStore, err = discordbot.OpenStore(whCfg.DiscordDBPath)
+		if err != nil {
+			logger.Fatalf("init discord store %q: %v", whCfg.DiscordDBPath, err)
+		}
+		defer func() {
+			if err := dcStore.Close(); err != nil {
+				logger.Printf("close discord store %q: %v", whCfg.DiscordDBPath, err)
+			}
+		}()
+
+		if whCfg.DiscordAppID != "" && whCfg.DiscordBotToken != "" {
+			dcClient, err = discordbot.NewClient(whCfg.DiscordAppID, whCfg.DiscordBotToken)
+			if err != nil {
+				logger.Fatalf("init discord client: %v", err)
+			}
+			dcVerifier = dcClient
+			if !*dryRun {
+				syncCtx, cancelSync := context.WithTimeout(ctx, 20*time.Second)
+				if err := dcClient.SyncCommands(syncCtx); err != nil {
+					logger.Printf("warning: failed to sync discord slash commands: %v", err)
+				} else {
+					logger.Printf("synced discord global slash commands (/ping, /notify-channel)")
+				}
+				cancelSync()
+			}
+		}
+
+		if *dryRun {
+			dcSender = stdoutDiscordSender{}
+		} else if dcClient != nil {
+			dcSender = dcClient
+		}
+		if dcSender != nil {
+			dcSched, err = discordbot.NewScheduler(discordbot.SchedulerConfig{
+				MasterDBPath: *dbPath,
+				Interval:     *interval,
+				CheckOnStart: true,
+			}, dcStore, dcSender, discordbot.WithLogger(logger))
+			if err != nil {
+				logger.Fatalf("init discord scheduler: %v", err)
+			}
+		}
 	}
 
-	if webhookSrv == nil {
-		if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Fatalf("watcher exited with error: %v", err)
-		}
-		logger.Printf("bot shutdown complete")
-		return
+	webhookSrv, err := buildWebhookServer(whCfg, chatSender, dcStore, dcVerifier, *dbPath, logger)
+	if err != nil {
+		logger.Fatalf("init webhook server: %v", err)
 	}
 
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 
 	wg.Add(1)
 	go func() {
@@ -263,14 +335,27 @@ func main() {
 		}
 	}()
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := webhookSrv.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
-			errCh <- fmt.Errorf("webhook server exited with error: %w", err)
-			cancelRun()
-		}
-	}()
+	if webhookSrv != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := webhookSrv.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- fmt.Errorf("webhook server exited with error: %w", err)
+				cancelRun()
+			}
+		}()
+	}
+
+	if dcSched != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := dcSched.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+				errCh <- fmt.Errorf("discord scheduler exited with error: %w", err)
+				cancelRun()
+			}
+		}()
+	}
 
 	wg.Wait()
 	close(errCh)

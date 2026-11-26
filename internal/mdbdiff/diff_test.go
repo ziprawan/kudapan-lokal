@@ -327,6 +327,68 @@ func TestDiffStoryEventData(t *testing.T) {
 	}
 }
 
+func TestLoadChampionsRoundMilestonesAfter(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "master.mdb")
+
+	schema := []string{
+		`CREATE TABLE text_data (id INTEGER NOT NULL, category INTEGER NOT NULL, "index" INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(category, "index"))`,
+		`CREATE TABLE champions_race_condition (champions_id INTEGER NOT NULL, round_id INTEGER NOT NULL, race_instance_id INTEGER NOT NULL, race_condition_id INTEGER NOT NULL, PRIMARY KEY(champions_id, round_id))`,
+		`CREATE TABLE race_instance (id INTEGER PRIMARY KEY, race_id INTEGER NOT NULL)`,
+		`CREATE TABLE race (id INTEGER PRIMARY KEY, course_set INTEGER NOT NULL)`,
+		`CREATE TABLE race_course_set (id INTEGER PRIMARY KEY, race_track_id INTEGER NOT NULL, distance INTEGER NOT NULL, ground INTEGER NOT NULL)`,
+		`CREATE TABLE champions_round_schedule (id INTEGER PRIMARY KEY, champions_id INTEGER NOT NULL, round INTEGER NOT NULL, round_detail INTEGER NOT NULL, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL, interval_start_time INTEGER NOT NULL, interval_end_time INTEGER NOT NULL)`,
+	}
+
+	createTestDB(t, dbPath, schema, []string{
+		`INSERT INTO text_data VALUES (206, 206, 23, 'Pisces Cup'), (35, 35, 10009, 'Hanshin')`,
+		`INSERT INTO champions_race_condition VALUES (23, 0, 1, 1)`,
+		`INSERT INTO race_instance VALUES (1, 101)`,
+		`INSERT INTO race VALUES (101, 201)`,
+		`INSERT INTO race_course_set VALUES (201, 10009, 2000, 1)`,
+		`INSERT INTO champions_round_schedule VALUES
+			(1, 23, 0, 0, 1700000000, 1700100000, 0, 0),
+			(2, 23, 1, 0, 1700100000, 1700200000, 0, 0),
+			(3, 23, 2, 0, 1700200000, 1700300000, 0, 0),
+			(4, 23, 3, 1, 1700300000, 1700350000, 0, 0),
+			(5, 23, 3, 2, 1700350000, 1700400000, 0, 0),
+			(6, 23, 3, 3, 1700400000, 1700500000, 0, 0)`,
+	})
+
+	all, err := LoadChampionsRoundMilestonesAfter(dbPath, 0)
+	if err != nil {
+		t.Fatalf("LoadChampionsRoundMilestonesAfter(0) error = %v", err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("got %d milestones (%+v), want 4 (Round 1, 2, 3.1, 3.3)", len(all), all)
+	}
+	wantLabels := []string{"Round 1", "Round 2", "Round 3 (Registration)", "Round 3 (Finals)"}
+	for i, m := range all {
+		if m.RoundLabel() != wantLabels[i] {
+			t.Errorf("milestone[%d].RoundLabel() = %q, want %q", i, m.RoundLabel(), wantLabels[i])
+		}
+		if m.Title != "Pisces Cup" || m.Course != "Hanshin Turf 2000m" {
+			t.Errorf("milestone[%d] title/course = (%q, %q)", i, m.Title, m.Course)
+		}
+	}
+
+	after, err := LoadChampionsRoundMilestonesAfter(dbPath, 3)
+	if err != nil {
+		t.Fatalf("LoadChampionsRoundMilestonesAfter(3) error = %v", err)
+	}
+	if len(after) != 2 || after[0].ID != 4 || after[1].ID != 6 {
+		t.Fatalf("LoadChampionsRoundMilestonesAfter(3) = %+v, want IDs 4 and 6", after)
+	}
+
+	maxID, err := MaxPastChampionsRoundMilestoneID(dbPath, time.Unix(1700360000, 0).UTC())
+	if err != nil {
+		t.Fatalf("MaxPastChampionsRoundMilestoneID() error = %v", err)
+	}
+	if maxID != 4 {
+		t.Errorf("MaxPastChampionsRoundMilestoneID() = %d, want 4", maxID)
+	}
+}
+
 func createTestDB(t *testing.T, path string, ddls, inserts []string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)

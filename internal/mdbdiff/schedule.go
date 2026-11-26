@@ -80,6 +80,35 @@ type StoryEvent struct {
 // StoryEventDiff holds added, deleted, and changed story_event_data rows.
 type StoryEventDiff = EntryDiff[StoryEvent]
 
+// ChampionsRoundMilestone represents a round start milestone in
+// champions_round_schedule (Round 1, Round 2, Round 3.1 Registration, or Round 3.3 Finals).
+type ChampionsRoundMilestone struct {
+	ID          int64
+	ChampionsID int64
+	Title       string
+	Course      string
+	Round       int64
+	RoundDetail int64
+	StartTime   time.Time
+	EndTime     time.Time
+}
+
+// RoundLabel returns a human-readable label for the Champions Meeting round milestone.
+func (m ChampionsRoundMilestone) RoundLabel() string {
+	switch {
+	case m.Round == 1 && m.RoundDetail == 0:
+		return "Round 1"
+	case m.Round == 2 && m.RoundDetail == 0:
+		return "Round 2"
+	case m.Round == 3 && m.RoundDetail == 1:
+		return "Round 3 (Registration)"
+	case m.Round == 3 && m.RoundDetail == 3:
+		return "Round 3 (Finals)"
+	default:
+		return fmt.Sprintf("Round %d.%d", m.Round, m.RoundDetail)
+	}
+}
+
 type entityRecord[T any] struct {
 	item   T
 	rowKey string
@@ -452,4 +481,89 @@ func loadStoryEvents(db *sql.DB) (map[int64]entityRecord[StoryEvent], error) {
 				EndTime:   time.Unix(endUnix, 0).UTC(),
 			}, nil
 		})
+}
+
+const championsRoundMilestoneWhere = `((round IN (1, 2) AND round_detail = 0) OR (round = 3 AND round_detail IN (1, 3)))`
+
+// LoadChampionsRoundMilestonesAfter opens dbPath read-only and returns all
+// Champions Meeting round milestones (Round 1, Round 2, Round 3.1 Registration,
+// and Round 3.3 Finals) with champions_round_schedule.id > afterID ordered by id ASC.
+func LoadChampionsRoundMilestonesAfter(dbPath string, afterID int64) ([]ChampionsRoundMilestone, error) {
+	db, err := openReadOnlySQLite(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+
+	exists, err := tableExists(db, "champions_round_schedule")
+	if err != nil || !exists {
+		return nil, err
+	}
+
+	texts, err := loadTextLookup(db, textCategoryChampionsCup)
+	if err != nil {
+		return nil, err
+	}
+	titles := texts[textCategoryChampionsCup]
+
+	courses, err := loadChampionsCourseMap(db)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := db.Query(`
+		SELECT id, champions_id, round, round_detail, start_date, end_date
+		FROM champions_round_schedule
+		WHERE id > ?
+		  AND `+championsRoundMilestoneWhere+`
+		ORDER BY id ASC`, afterID)
+	if err != nil {
+		return nil, fmt.Errorf("query champions_round_schedule: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ChampionsRoundMilestone
+	for rows.Next() {
+		var id, champID, round, detail, startUnix, endUnix int64
+		if err := rows.Scan(&id, &champID, &round, &detail, &startUnix, &endUnix); err != nil {
+			return nil, err
+		}
+		out = append(out, ChampionsRoundMilestone{
+			ID:          id,
+			ChampionsID: champID,
+			Title:       normalizeSingleLineTitle(titles[champID]),
+			Course:      courses[champID],
+			Round:       round,
+			RoundDetail: detail,
+			StartTime:   time.Unix(startUnix, 0).UTC(),
+			EndTime:     time.Unix(endUnix, 0).UTC(),
+		})
+	}
+	return out, rows.Err()
+}
+
+// MaxPastChampionsRoundMilestoneID returns the highest milestone id in
+// champions_round_schedule whose start_date is <= now (or 0 if none/missing).
+func MaxPastChampionsRoundMilestoneID(dbPath string, now time.Time) (int64, error) {
+	db, err := openReadOnlySQLite(dbPath)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+
+	exists, err := tableExists(db, "champions_round_schedule")
+	if err != nil || !exists {
+		return 0, err
+	}
+
+	var maxID int64
+	err = db.QueryRow(`
+		SELECT COALESCE(MAX(id), 0)
+		FROM champions_round_schedule
+		WHERE `+championsRoundMilestoneWhere+`
+		  AND start_date <= ?`, now.UTC().Unix()).Scan(&maxID)
+	if err != nil {
+		return 0, fmt.Errorf("query max past champions_round_schedule id: %w", err)
+	}
+	return maxID, nil
 }
