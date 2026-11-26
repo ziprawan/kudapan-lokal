@@ -287,3 +287,31 @@ func TestSplitMessageAndTelegramSend(t *testing.T) {
 		t.Fatal("expected error when Telegram returns ok=false")
 	}
 }
+
+func TestTelegramSendMessageToChat(t *testing.T) {
+	var got sendMessageRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("unmarshal req: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewTelegramClient("secret-token", "default-chat", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewTelegramClient() error = %v", err)
+	}
+
+	if err := client.SendMessageToChat(context.Background(), "   ", "hello"); err == nil {
+		t.Fatal("expected error for empty target chatID")
+	}
+
+	if err := client.SendMessageToChat(context.Background(), " 999888 ", "Pong!"); err != nil {
+		t.Fatalf("SendMessageToChat() error = %v", err)
+	}
+	if got.ChatID != "999888" || got.Text != "Pong!" || got.ParseMode != "HTML" {
+		t.Errorf("unexpected request payload: %+v", got)
+	}
+}

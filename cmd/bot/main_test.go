@@ -2,6 +2,13 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,5 +108,104 @@ func TestSetupLogger(t *testing.T) {
 	}
 	if !strings.Contains(consoleOnly.String(), "console only") {
 		t.Errorf("consoleOnly missing message: %q", consoleOnly.String())
+	}
+}
+
+func TestWebhookEnvAndServerWiring(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey() error = %v", err)
+	}
+	pubHex := hex.EncodeToString(pub)
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	content := "WEBHOOK_LISTEN_ADDR=:9090\n" +
+		"TELEGRAM_WEBHOOK_SECRET=secret-tg\n" +
+		"DISCORD_PUBLIC_KEY=" + pubHex + "\n" +
+		"DISCORD_APP_ID=123456789\n" +
+		"DISCORD_BOT_TOKEN=bot-token\n"
+	if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	for _, k := range []string{
+		"WEBHOOK_LISTEN_ADDR",
+		"TELEGRAM_WEBHOOK_SECRET",
+		"DISCORD_PUBLIC_KEY",
+		"DISCORD_APP_ID",
+		"DISCORD_BOT_TOKEN",
+	} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+
+	loaded, err := loadDotEnv(envPath, true)
+	if err != nil || !loaded {
+		t.Fatalf("loadDotEnv() = (%v, %v), want (true, nil)", loaded, err)
+	}
+
+	cfg := webhookConfig{
+		ListenAddr:            resolveFlagOrEnv("", "WEBHOOK_LISTEN_ADDR"),
+		TelegramWebhookSecret: resolveFlagOrEnv("flag-secret", "TELEGRAM_WEBHOOK_SECRET"),
+		DiscordPublicKey:      resolveFlagOrEnv("", "DISCORD_PUBLIC_KEY"),
+		DiscordAppID:          resolveFlagOrEnv("", "DISCORD_APP_ID"),
+		DiscordBotToken:       resolveFlagOrEnv("", "DISCORD_BOT_TOKEN"),
+	}
+	if cfg.ListenAddr != ":9090" || cfg.TelegramWebhookSecret != "flag-secret" || cfg.DiscordPublicKey != pubHex {
+		t.Fatalf("unexpected resolved webhookConfig: %+v", cfg)
+	}
+
+	// Empty ListenAddr disables server creation cleanly.
+	disabledSrv, err := buildWebhookServer(webhookConfig{}, stdoutNotifier{}, log.New(io.Discard, "", 0))
+	if err != nil || disabledSrv != nil {
+		t.Fatalf("expected (nil, nil) for disabled webhook server, got (%v, %v)", disabledSrv, err)
+	}
+
+	// Invalid Discord public key fails fast.
+	if _, err := buildWebhookServer(webhookConfig{
+		ListenAddr:       "127.0.0.1:0",
+		DiscordPublicKey: "invalid-hex",
+	}, stdoutNotifier{}, log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("expected error for invalid DISCORD_PUBLIC_KEY")
+	}
+
+	// Valid wiring with empty DISCORD_PUBLIC_KEY serves /webhook/telegram and returns 503 on /webhook/discord.
+	noDiscordSrv, err := buildWebhookServer(webhookConfig{
+		ListenAddr:            "127.0.0.1:0",
+		TelegramWebhookSecret: cfg.TelegramWebhookSecret,
+	}, stdoutNotifier{}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("buildWebhookServer(no discord) error = %v", err)
+	}
+	rec503 := httptest.NewRecorder()
+	noDiscordSrv.Handler().ServeHTTP(rec503, httptest.NewRequest(http.MethodPost, "/webhook/discord", strings.NewReader("{}")))
+	if rec503.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when DISCORD_PUBLIC_KEY omitted, got %d", rec503.Code)
+	}
+
+	// Full wiring serves both /webhook/telegram and /webhook/discord.
+	fullSrv, err := buildWebhookServer(cfg, stdoutNotifier{}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatalf("buildWebhookServer(full) error = %v", err)
+	}
+	tgReq := httptest.NewRequest(http.MethodPost, "/webhook/telegram", strings.NewReader(`{"update_id":1}`))
+	tgReq.Header.Set("X-Telegram-Bot-Api-Secret-Token", "flag-secret")
+	tgRec := httptest.NewRecorder()
+	fullSrv.Handler().ServeHTTP(tgRec, tgReq)
+	if tgRec.Code != http.StatusOK {
+		t.Fatalf("POST /webhook/telegram status = %d, want 200", tgRec.Code)
+	}
+
+	body := []byte(`{"type":1}`)
+	ts := "1700000000"
+	sig := hex.EncodeToString(ed25519.Sign(priv, append([]byte(ts), body...)))
+	dcReq := httptest.NewRequest(http.MethodPost, "/webhook/discord", bytes.NewReader(body))
+	dcReq.Header.Set("X-Signature-Ed25519", sig)
+	dcReq.Header.Set("X-Signature-Timestamp", ts)
+	dcRec := httptest.NewRecorder()
+	fullSrv.Handler().ServeHTTP(dcRec, dcReq)
+	if dcRec.Code != http.StatusOK || !strings.Contains(dcRec.Body.String(), `"type":1`) {
+		t.Fatalf("POST /webhook/discord status=%d body=%s", dcRec.Code, dcRec.Body.String())
 	}
 }

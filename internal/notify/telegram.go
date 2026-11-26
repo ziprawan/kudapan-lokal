@@ -93,21 +93,31 @@ type telegramAPIResponse struct {
 	Description string `json:"description"`
 }
 
-// SendMessage delivers text to the configured Telegram chat, splitting on
+// SendMessage delivers text to the configured default Telegram chat, splitting on
 // newline boundaries when text exceeds Telegram's 4096-character limit.
 func (c *TelegramClient) SendMessage(ctx context.Context, text string) error {
+	return c.SendMessageToChat(ctx, c.chatID, text)
+}
+
+// SendMessageToChat delivers text to the specified Telegram chatID, splitting on
+// newline boundaries when text exceeds Telegram's 4096-character limit.
+func (c *TelegramClient) SendMessageToChat(ctx context.Context, chatID, text string) error {
+	chatID = strings.TrimSpace(chatID)
+	if chatID == "" {
+		return errors.New("telegram chat id cannot be empty")
+	}
 	chunks := SplitMessage(text, MaxTelegramMessageRunes)
 	for i, chunk := range chunks {
-		if err := c.sendChunk(ctx, chunk); err != nil {
+		if err := c.sendChunkToChat(ctx, chatID, chunk); err != nil {
 			return fmt.Errorf("send telegram message chunk %d/%d: %w", i+1, len(chunks), err)
 		}
 	}
 	return nil
 }
 
-func (c *TelegramClient) sendChunk(ctx context.Context, text string) error {
+func (c *TelegramClient) sendChunkToChat(ctx context.Context, chatID, text string) error {
 	payload, err := json.Marshal(sendMessageRequest{
-		ChatID:                c.chatID,
+		ChatID:                chatID,
 		Text:                  text,
 		ParseMode:             "HTML",
 		DisableWebPagePreview: true,

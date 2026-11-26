@@ -1,5 +1,6 @@
-// Command bot polls the Uma Musume API hourly for master.mdb updates and sends
-// table and campaign_data diffs to a Telegram chat.
+// Command bot polls the Uma Musume API hourly for master.mdb updates, sends
+// table and campaign_data diffs to a Telegram chat, and optionally serves HTTP
+// webhook endpoints for Telegram and Discord.
 package main
 
 import (
@@ -10,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +26,7 @@ import (
 	"kudapan_lokal/internal/savedata"
 	"kudapan_lokal/internal/umaclient"
 	"kudapan_lokal/internal/watcher"
+	"kudapan_lokal/internal/webhook"
 )
 
 const (
@@ -39,20 +43,89 @@ func (stdoutNotifier) SendMessage(_ context.Context, text string) error {
 	return nil
 }
 
+func (stdoutNotifier) SendMessageToChat(_ context.Context, chatID, text string) error {
+	fmt.Printf("----- TELEGRAM MESSAGE (chat_id=%s) -----\n", chatID)
+	fmt.Println(text)
+	fmt.Println("-----------------------------------------")
+	return nil
+}
+
+type webhookConfig struct {
+	ListenAddr            string
+	TelegramWebhookSecret string
+	DiscordPublicKey      string
+	DiscordAppID          string
+	DiscordBotToken       string
+}
+
+func resolveFlagOrEnv(flagVal, envKey string) string {
+	if trimmed := strings.TrimSpace(flagVal); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(os.Getenv(envKey))
+}
+
+func buildWebhookServer(cfg webhookConfig, sender webhook.ChatSender, logger *log.Logger) (*webhook.Server, error) {
+	listenAddr := strings.TrimSpace(cfg.ListenAddr)
+	if listenAddr == "" {
+		return nil, nil
+	}
+	if logger == nil {
+		logger = log.Default()
+	}
+
+	tgHandler := webhook.NewTelegramHandler(webhook.TelegramConfig{
+		SecretToken: cfg.TelegramWebhookSecret,
+		Sender:      sender,
+		Logger:      logger,
+	})
+
+	var dcHandler http.Handler
+	if strings.TrimSpace(cfg.DiscordPublicKey) != "" {
+		h, err := webhook.NewDiscordHandler(webhook.DiscordConfig{
+			PublicKeyHex: cfg.DiscordPublicKey,
+			Logger:       logger,
+		})
+		if err != nil {
+			return nil, err
+		}
+		dcHandler = h
+	} else {
+		logger.Printf("discord webhook disabled (/webhook/discord returns 503): DISCORD_PUBLIC_KEY not set")
+	}
+
+	if cfg.DiscordAppID != "" || cfg.DiscordBotToken != "" {
+		logger.Printf("discord app metadata loaded (app_id_set=%v, bot_token_set=%v)",
+			cfg.DiscordAppID != "", cfg.DiscordBotToken != "")
+	}
+
+	return webhook.NewServer(webhook.Config{
+		ListenAddr:      listenAddr,
+		TelegramHandler: tgHandler,
+		DiscordHandler:  dcHandler,
+		Logger:          logger,
+	})
+}
+
 func main() {
 	var (
-		envPath      = flag.String("env", defaultEnvPath, "Path to .env file")
-		token        = flag.String("token", "", "Telegram bot token (overrides TELEGRAM_BOT_TOKEN in .env/env)")
-		chatID       = flag.String("chat-id", "", "Telegram chat ID (overrides TELEGRAM_CHAT_ID in .env/env)")
-		savedataPath = flag.String("savedata", savedata.DefaultFilePath, "Path to savedata.json")
-		statePath    = flag.String("state", watcher.DefaultStatePath, "Path to watcher state.json")
-		dbPath       = flag.String("db", watcher.DefaultMasterDBPath, "Path to cached baseline master.mdb")
-		seedDBPath   = flag.String("seed-db", "", "Optional path to seed initial baseline master.mdb (e.g. /mnt/bind/master.mdb)")
-		interval     = flag.Duration("interval", watcher.DefaultInterval, "Check interval (e.g. 1h)")
-		once         = flag.Bool("once", false, "Run a single check and exit")
-		dryRun       = flag.Bool("dry-run", false, "Print formatted messages to stdout instead of sending to Telegram")
-		logFilePath  = flag.String("log-file", defaultLogFilePath, "Path to append logs alongside console output (empty disables file logging)")
-		verbose      = flag.Bool("verbose", false, "Enable verbose logs (manifest resolution steps, URLs, per-table diffs)")
+		envPath               = flag.String("env", defaultEnvPath, "Path to .env file")
+		token                 = flag.String("token", "", "Telegram bot token (overrides TELEGRAM_BOT_TOKEN in .env/env)")
+		chatID                = flag.String("chat-id", "", "Telegram chat ID (overrides TELEGRAM_CHAT_ID in .env/env)")
+		listenAddr            = flag.String("listen", "", "HTTP listen address for webhook server (e.g. :8080; empty disables webhook server; overrides WEBHOOK_LISTEN_ADDR)")
+		telegramWebhookSecret = flag.String("telegram-webhook-secret", "", "Optional secret token for /webhook/telegram (overrides TELEGRAM_WEBHOOK_SECRET)")
+		discordPublicKey      = flag.String("discord-public-key", "", "Discord application Ed25519 public key (hex) for /webhook/discord (overrides DISCORD_PUBLIC_KEY)")
+		discordAppID          = flag.String("discord-app-id", "", "Optional Discord application ID (overrides DISCORD_APP_ID)")
+		discordBotToken       = flag.String("discord-bot-token", "", "Optional Discord bot token (overrides DISCORD_BOT_TOKEN)")
+		savedataPath          = flag.String("savedata", savedata.DefaultFilePath, "Path to savedata.json")
+		statePath             = flag.String("state", watcher.DefaultStatePath, "Path to watcher state.json")
+		dbPath                = flag.String("db", watcher.DefaultMasterDBPath, "Path to cached baseline master.mdb")
+		seedDBPath            = flag.String("seed-db", "", "Optional path to seed initial baseline master.mdb (e.g. /mnt/bind/master.mdb)")
+		interval              = flag.Duration("interval", watcher.DefaultInterval, "Check interval (e.g. 1h)")
+		once                  = flag.Bool("once", false, "Run a single check and exit")
+		dryRun                = flag.Bool("dry-run", false, "Print formatted messages to stdout instead of sending to Telegram")
+		logFilePath           = flag.String("log-file", defaultLogFilePath, "Path to append logs alongside console output (empty disables file logging)")
+		verbose               = flag.Bool("verbose", false, "Enable verbose logs (manifest resolution steps, URLs, per-table diffs)")
 	)
 	flag.Parse()
 
@@ -80,18 +153,19 @@ func main() {
 		logger.Fatalf("load env file %q: %v", *envPath, err)
 	}
 
-	resolvedToken := *token
-	if resolvedToken == "" {
-		resolvedToken = os.Getenv("TELEGRAM_BOT_TOKEN")
-	}
-	resolvedChatID := *chatID
-	if resolvedChatID == "" {
-		resolvedChatID = os.Getenv("TELEGRAM_CHAT_ID")
+	resolvedToken := resolveFlagOrEnv(*token, "TELEGRAM_BOT_TOKEN")
+	resolvedChatID := resolveFlagOrEnv(*chatID, "TELEGRAM_CHAT_ID")
+	whCfg := webhookConfig{
+		ListenAddr:            resolveFlagOrEnv(*listenAddr, "WEBHOOK_LISTEN_ADDR"),
+		TelegramWebhookSecret: resolveFlagOrEnv(*telegramWebhookSecret, "TELEGRAM_WEBHOOK_SECRET"),
+		DiscordPublicKey:      resolveFlagOrEnv(*discordPublicKey, "DISCORD_PUBLIC_KEY"),
+		DiscordAppID:          resolveFlagOrEnv(*discordAppID, "DISCORD_APP_ID"),
+		DiscordBotToken:       resolveFlagOrEnv(*discordBotToken, "DISCORD_BOT_TOKEN"),
 	}
 
 	logger.Printf(
-		"starting kudapan_lokal bot (env=%q loaded=%v, savedata=%q, state=%q, db=%q, seed=%q, interval=%s, once=%v, dry_run=%v, verbose=%v, log_file=%q)",
-		*envPath, envLoaded, *savedataPath, *statePath, *dbPath, *seedDBPath, *interval, *once, *dryRun, *verbose, *logFilePath,
+		"starting kudapan_lokal bot (env=%q loaded=%v, savedata=%q, state=%q, db=%q, seed=%q, interval=%s, once=%v, dry_run=%v, verbose=%v, log_file=%q, webhook_listen=%q)",
+		*envPath, envLoaded, *savedataPath, *statePath, *dbPath, *seedDBPath, *interval, *once, *dryRun, *verbose, *logFilePath, whCfg.ListenAddr,
 	)
 
 	store, err := savedata.LoadOrInit(*savedataPath)
@@ -115,16 +189,22 @@ func main() {
 		logger.Fatalf("init masterdb receiver: %v", err)
 	}
 
-	var notifier notify.Notifier
+	var (
+		notifier   notify.Notifier
+		chatSender webhook.ChatSender
+	)
 	if *dryRun {
 		logger.Printf("dry-run mode enabled: formatted notifications will print to stdout instead of Telegram")
-		notifier = stdoutNotifier{}
+		dry := stdoutNotifier{}
+		notifier = dry
+		chatSender = dry
 	} else {
 		tg, err := notify.NewTelegramClient(resolvedToken, resolvedChatID)
 		if err != nil {
 			logger.Fatalf("init telegram notifier: %v", err)
 		}
 		notifier = tg
+		chatSender = tg
 	}
 
 	svc, err := watcher.New(watcher.Config{
@@ -155,8 +235,49 @@ func main() {
 		return
 	}
 
-	if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Fatalf("watcher exited with error: %v", err)
+	webhookSrv, err := buildWebhookServer(whCfg, chatSender, logger)
+	if err != nil {
+		logger.Fatalf("init webhook server: %v", err)
+	}
+
+	if webhookSrv == nil {
+		if err := svc.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			logger.Fatalf("watcher exited with error: %v", err)
+		}
+		logger.Printf("bot shutdown complete")
+		return
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, 2)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := svc.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("watcher exited with error: %w", err)
+			cancelRun()
+		}
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := webhookSrv.Run(runCtx); err != nil && !errors.Is(err, context.Canceled) {
+			errCh <- fmt.Errorf("webhook server exited with error: %w", err)
+			cancelRun()
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			logger.Fatalf("%v", err)
+		}
 	}
 	logger.Printf("bot shutdown complete")
 }
