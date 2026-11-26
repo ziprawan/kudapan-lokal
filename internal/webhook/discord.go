@@ -65,7 +65,7 @@ type DiscordConfig struct {
 	Logger       *log.Logger
 }
 
-// DiscordHandler handles POST /webhook/discord HTTP interaction webhooks.
+// DiscordHandler handles POST /api/webhook/discord HTTP interaction webhooks.
 type DiscordHandler struct {
 	pubKey ed25519.PublicKey
 	logger *log.Logger

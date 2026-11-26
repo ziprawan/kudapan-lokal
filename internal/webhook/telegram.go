@@ -58,7 +58,7 @@ type TelegramConfig struct {
 	Logger      *log.Logger
 }
 
-// TelegramHandler handles POST /webhook/telegram requests from Telegram.
+// TelegramHandler handles POST /api/webhook/telegram requests from Telegram.
 type TelegramHandler struct {
 	secretToken string
 	sender      ChatSender

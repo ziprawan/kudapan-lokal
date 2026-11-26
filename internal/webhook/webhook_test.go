@@ -118,7 +118,7 @@ func TestDiscordHandlerPingCommandsAndUnauthorized(t *testing.T) {
 	}
 
 	doDiscord := func(body []byte, sig, ts string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "/webhook/discord", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/api/webhook/discord", bytes.NewReader(body))
 		if sig != "" {
 			req.Header.Set("X-Signature-Ed25519", sig)
 		}
@@ -204,7 +204,7 @@ func TestTelegramHandlerSecretAndCommands(t *testing.T) {
 	payload := []byte(`{"update_id":42,"message":{"message_id":7,"chat":{"id":-10012345,"type":"supergroup"},"date":1700000000,"text":"/ping@mybot"}}`)
 
 	// Missing secret token -> 401
-	reqNoSecret := httptest.NewRequest(http.MethodPost, "/webhook/telegram", bytes.NewReader(payload))
+	reqNoSecret := httptest.NewRequest(http.MethodPost, "/api/webhook/telegram", bytes.NewReader(payload))
 	recNoSecret := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recNoSecret, reqNoSecret)
 	if recNoSecret.Code != http.StatusUnauthorized {
@@ -212,7 +212,7 @@ func TestTelegramHandlerSecretAndCommands(t *testing.T) {
 	}
 
 	// Wrong secret token -> 401
-	reqBadSecret := httptest.NewRequest(http.MethodPost, "/webhook/telegram", bytes.NewReader(payload))
+	reqBadSecret := httptest.NewRequest(http.MethodPost, "/api/webhook/telegram", bytes.NewReader(payload))
 	reqBadSecret.Header.Set("X-Telegram-Bot-Api-Secret-Token", "wrong")
 	recBadSecret := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recBadSecret, reqBadSecret)
@@ -221,7 +221,7 @@ func TestTelegramHandlerSecretAndCommands(t *testing.T) {
 	}
 
 	// Valid secret token + /ping@mybot -> 200 and reply sent
-	reqOK := httptest.NewRequest(http.MethodPost, "/webhook/telegram", bytes.NewReader(payload))
+	reqOK := httptest.NewRequest(http.MethodPost, "/api/webhook/telegram", bytes.NewReader(payload))
 	reqOK.Header.Set("X-Telegram-Bot-Api-Secret-Token", "tg-secret-123")
 	recOK := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recOK, reqOK)
@@ -234,7 +234,7 @@ func TestTelegramHandlerSecretAndCommands(t *testing.T) {
 
 	// /pingpong must NOT trigger /ping
 	nonPingPayload := []byte(`{"update_id":43,"message":{"message_id":8,"chat":{"id":123,"type":"private"},"date":1700000001,"text":"/pingpong"}}`)
-	reqOther := httptest.NewRequest(http.MethodPost, "/webhook/telegram", bytes.NewReader(nonPingPayload))
+	reqOther := httptest.NewRequest(http.MethodPost, "/api/webhook/telegram", bytes.NewReader(nonPingPayload))
 	reqOther.Header.Set("X-Telegram-Bot-Api-Secret-Token", "tg-secret-123")
 	recOther := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(recOther, reqOther)
@@ -268,7 +268,7 @@ func TestServerRoutesHealthAndGracefulShutdown(t *testing.T) {
 	}
 
 	// Unconfigured handlers return 503 Service Unavailable
-	for _, path := range []string{"/webhook/telegram", "/webhook/discord"} {
+	for _, path := range []string{"/api/webhook/telegram", "/api/webhook/discord"} {
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}")))
 		if rec.Code != http.StatusServiceUnavailable {
@@ -278,9 +278,9 @@ func TestServerRoutesHealthAndGracefulShutdown(t *testing.T) {
 
 	// Wrong HTTP method returns 405 Method Not Allowed
 	recMethod := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(recMethod, httptest.NewRequest(http.MethodGet, "/webhook/discord", nil))
+	srv.Handler().ServeHTTP(recMethod, httptest.NewRequest(http.MethodGet, "/api/webhook/discord", nil))
 	if recMethod.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET /webhook/discord status = %d, want 405", recMethod.Code)
+		t.Errorf("GET /api/webhook/discord status = %d, want 405", recMethod.Code)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -304,17 +304,17 @@ func TestServerRoutesHealthAndGracefulShutdown(t *testing.T) {
 		t.Fatal("webhook server did not bind an address within timeout")
 	}
 
-	resp, err := http.Get("http://" + addrStr + "/healthz")
+	resp, err := http.Get("http://" + addrStr + "/api/healthz")
 	if err != nil {
-		t.Fatalf("GET /healthz error = %v", err)
+		t.Fatalf("GET /api/healthz error = %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /healthz status = %d, want 200", resp.StatusCode)
+		t.Fatalf("GET /api/healthz status = %d, want 200", resp.StatusCode)
 	}
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(bodyBytes), `"status":"ok"`) {
-		t.Errorf("unexpected /healthz body: %s", string(bodyBytes))
+		t.Errorf("unexpected /api/healthz body: %s", string(bodyBytes))
 	}
 
 	cancel()

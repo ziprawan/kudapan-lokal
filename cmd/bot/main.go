@@ -91,7 +91,7 @@ func buildWebhookServer(cfg webhookConfig, sender webhook.ChatSender, logger *lo
 		}
 		dcHandler = h
 	} else {
-		logger.Printf("discord webhook disabled (/webhook/discord returns 503): DISCORD_PUBLIC_KEY not set")
+		logger.Printf("discord webhook disabled (/api/webhook/discord returns 503): DISCORD_PUBLIC_KEY not set")
 	}
 
 	if cfg.DiscordAppID != "" || cfg.DiscordBotToken != "" {
@@ -113,8 +113,8 @@ func main() {
 		token                 = flag.String("token", "", "Telegram bot token (overrides TELEGRAM_BOT_TOKEN in .env/env)")
 		chatID                = flag.String("chat-id", "", "Telegram chat ID (overrides TELEGRAM_CHAT_ID in .env/env)")
 		listenAddr            = flag.String("listen", "", "HTTP listen address for webhook server (e.g. :8080; empty disables webhook server; overrides WEBHOOK_LISTEN_ADDR)")
-		telegramWebhookSecret = flag.String("telegram-webhook-secret", "", "Optional secret token for /webhook/telegram (overrides TELEGRAM_WEBHOOK_SECRET)")
-		discordPublicKey      = flag.String("discord-public-key", "", "Discord application Ed25519 public key (hex) for /webhook/discord (overrides DISCORD_PUBLIC_KEY)")
+		telegramWebhookSecret = flag.String("telegram-webhook-secret", "", "Optional secret token for /api/webhook/telegram (overrides TELEGRAM_WEBHOOK_SECRET)")
+		discordPublicKey      = flag.String("discord-public-key", "", "Discord application Ed25519 public key (hex) for /api/webhook/discord (overrides DISCORD_PUBLIC_KEY)")
 		discordAppID          = flag.String("discord-app-id", "", "Optional Discord application ID (overrides DISCORD_APP_ID)")
 		discordBotToken       = flag.String("discord-bot-token", "", "Optional Discord bot token (overrides DISCORD_BOT_TOKEN)")
 		savedataPath          = flag.String("savedata", savedata.DefaultFilePath, "Path to savedata.json")

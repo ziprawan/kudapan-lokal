@@ -170,7 +170,7 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 		t.Fatal("expected error for invalid DISCORD_PUBLIC_KEY")
 	}
 
-	// Valid wiring with empty DISCORD_PUBLIC_KEY serves /webhook/telegram and returns 503 on /webhook/discord.
+	// Valid wiring with empty DISCORD_PUBLIC_KEY serves /api/webhook/telegram and returns 503 on /api/webhook/discord.
 	noDiscordSrv, err := buildWebhookServer(webhookConfig{
 		ListenAddr:            "127.0.0.1:0",
 		TelegramWebhookSecret: cfg.TelegramWebhookSecret,
@@ -179,33 +179,33 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 		t.Fatalf("buildWebhookServer(no discord) error = %v", err)
 	}
 	rec503 := httptest.NewRecorder()
-	noDiscordSrv.Handler().ServeHTTP(rec503, httptest.NewRequest(http.MethodPost, "/webhook/discord", strings.NewReader("{}")))
+	noDiscordSrv.Handler().ServeHTTP(rec503, httptest.NewRequest(http.MethodPost, "/api/webhook/discord", strings.NewReader("{}")))
 	if rec503.Code != http.StatusServiceUnavailable {
 		t.Fatalf("expected 503 when DISCORD_PUBLIC_KEY omitted, got %d", rec503.Code)
 	}
 
-	// Full wiring serves both /webhook/telegram and /webhook/discord.
+	// Full wiring serves both /api/webhook/telegram and /api/webhook/discord.
 	fullSrv, err := buildWebhookServer(cfg, stdoutNotifier{}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatalf("buildWebhookServer(full) error = %v", err)
 	}
-	tgReq := httptest.NewRequest(http.MethodPost, "/webhook/telegram", strings.NewReader(`{"update_id":1}`))
+	tgReq := httptest.NewRequest(http.MethodPost, "/api/webhook/telegram", strings.NewReader(`{"update_id":1}`))
 	tgReq.Header.Set("X-Telegram-Bot-Api-Secret-Token", "flag-secret")
 	tgRec := httptest.NewRecorder()
 	fullSrv.Handler().ServeHTTP(tgRec, tgReq)
 	if tgRec.Code != http.StatusOK {
-		t.Fatalf("POST /webhook/telegram status = %d, want 200", tgRec.Code)
+		t.Fatalf("POST /api/webhook/telegram status = %d, want 200", tgRec.Code)
 	}
 
 	body := []byte(`{"type":1}`)
 	ts := "1700000000"
 	sig := hex.EncodeToString(ed25519.Sign(priv, append([]byte(ts), body...)))
-	dcReq := httptest.NewRequest(http.MethodPost, "/webhook/discord", bytes.NewReader(body))
+	dcReq := httptest.NewRequest(http.MethodPost, "/api/webhook/discord", bytes.NewReader(body))
 	dcReq.Header.Set("X-Signature-Ed25519", sig)
 	dcReq.Header.Set("X-Signature-Timestamp", ts)
 	dcRec := httptest.NewRecorder()
 	fullSrv.Handler().ServeHTTP(dcRec, dcReq)
 	if dcRec.Code != http.StatusOK || !strings.Contains(dcRec.Body.String(), `"type":1`) {
-		t.Fatalf("POST /webhook/discord status=%d body=%s", dcRec.Code, dcRec.Body.String())
+		t.Fatalf("POST /api/webhook/discord status=%d body=%s", dcRec.Code, dcRec.Body.String())
 	}
 }

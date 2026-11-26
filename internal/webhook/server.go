@@ -38,8 +38,8 @@ type Server struct {
 	addr net.Addr
 }
 
-// NewServer constructs a webhook Server with /healthz, /webhook/telegram, and
-// /webhook/discord routes registered.
+// NewServer constructs a webhook Server with /api/healthz, /api/webhook/telegram,
+// and /api/webhook/discord routes registered.
 func NewServer(cfg Config) (*Server, error) {
 	cfg.ListenAddr = strings.TrimSpace(cfg.ListenAddr)
 	if cfg.ListenAddr == "" {
@@ -51,11 +51,11 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	mux.Handle("POST /webhook/telegram", handlerOrUnavailable(cfg.TelegramHandler, "telegram webhook not configured"))
-	mux.Handle("POST /webhook/discord", handlerOrUnavailable(cfg.DiscordHandler, "discord webhook not configured"))
+	mux.Handle("POST /api/webhook/telegram", handlerOrUnavailable(cfg.TelegramHandler, "telegram webhook not configured"))
+	mux.Handle("POST /api/webhook/discord", handlerOrUnavailable(cfg.DiscordHandler, "discord webhook not configured"))
 
 	return &Server{
 		cfg:    cfg,
@@ -97,7 +97,7 @@ func (s *Server) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	s.logger.Printf("webhook server listening on %s (routes: GET /healthz, POST /webhook/telegram, POST /webhook/discord)", ln.Addr().String())
+	s.logger.Printf("webhook server listening on %s (routes: GET /api/healthz, POST /api/webhook/telegram, POST /api/webhook/discord)", ln.Addr().String())
 
 	errCh := make(chan error, 1)
 	go func() {
