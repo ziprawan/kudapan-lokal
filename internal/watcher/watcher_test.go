@@ -238,7 +238,7 @@ func TestWatcherVerboseLoggingAndSchedule(t *testing.T) {
 		}
 	}
 
-	// Verify Run() logs the minute-00 aligned next schedule before arming the timer.
+	// Verify Run() logs the minute-02 aligned next schedule before arming the timer.
 	var runLogBuf bytes.Buffer
 	schedTime := time.Date(2026, 11, 21, 14, 50, 12, 0, time.UTC)
 	schedSvc, err := New(Config{
@@ -255,7 +255,7 @@ func TestWatcherVerboseLoggingAndSchedule(t *testing.T) {
 	if err := schedSvc.Run(runCtx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("schedSvc.Run() error = %v, want context.DeadlineExceeded", err)
 	}
-	wantSched := "next check scheduled at 2026-11-21 15:00:00 UTC (in 9m48s)"
+	wantSched := "next check scheduled at 2026-11-21 15:02:00 UTC (in 11m48s)"
 	if !strings.Contains(runLogBuf.String(), wantSched) {
 		t.Errorf("Run() logs missing %q;\ngot:\n%s", wantSched, runLogBuf.String())
 	}
@@ -274,22 +274,29 @@ func TestNextAlignedTime(t *testing.T) {
 			name:     "mid hour +07:00",
 			now:      time.Date(2026, 11, 22, 14, 50, 12, 0, wib),
 			interval: time.Hour,
-			want:     time.Date(2026, 11, 22, 15, 0, 0, 0, wib),
-			wantWait: 9*time.Minute + 48*time.Second,
+			want:     time.Date(2026, 11, 22, 15, 2, 0, 0, wib),
+			wantWait: 11*time.Minute + 48*time.Second,
 		},
 		{
-			name:     "exact hour +07:00",
+			name:     "top of hour before offset +07:00",
 			now:      time.Date(2026, 11, 22, 15, 0, 0, 0, wib),
 			interval: time.Hour,
-			want:     time.Date(2026, 11, 22, 16, 0, 0, 0, wib),
+			want:     time.Date(2026, 11, 22, 15, 2, 0, 0, wib),
+			wantWait: 2 * time.Minute,
+		},
+		{
+			name:     "exact aligned target +07:00",
+			now:      time.Date(2026, 11, 22, 15, 2, 0, 0, wib),
+			interval: time.Hour,
+			want:     time.Date(2026, 11, 22, 16, 2, 0, 0, wib),
 			wantWait: time.Hour,
 		},
 		{
 			name:     "midnight rollover +07:00",
 			now:      time.Date(2026, 11, 22, 23, 59, 59, 0, wib),
 			interval: time.Hour,
-			want:     time.Date(2026, 11, 23, 0, 0, 0, 0, wib),
-			wantWait: time.Second,
+			want:     time.Date(2026, 11, 23, 0, 2, 0, 0, wib),
+			wantWait: 2*time.Minute + time.Second,
 		},
 		{
 			name:     "sub-hour interval",

@@ -21,6 +21,9 @@ const (
 	DefaultMasterDBPath = "data/master.mdb"
 	// DefaultInterval is the default polling interval (once per hour).
 	DefaultInterval = time.Hour
+	// DefaultAlignmentOffset shifts hourly checks 2 minutes past the top of the
+	// hour so upstream updates published at :00 are available when fetched.
+	DefaultAlignmentOffset = 2 * time.Minute
 )
 
 // MasterFetcher abstracts masterdb.Receiver for testing.
@@ -121,14 +124,17 @@ func New(cfg Config, store *savedata.Store, fetcher MasterFetcher, notifier noti
 
 // NextAlignedTime returns the next check time strictly after now aligned to an
 // interval boundary. For whole-hour intervals (including 1h), alignment runs in
-// now's local timezone at minute 00, second 00 (e.g. HH:00:00).
+// now's local timezone at minute 02, second 00 (e.g. HH:02:00).
 func NextAlignedTime(now time.Time, interval time.Duration) time.Time {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
 	if interval >= time.Hour && interval%time.Hour == 0 {
-		hourStart := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location())
-		return hourStart.Add(interval)
+		hourTarget := time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, now.Location()).Add(DefaultAlignmentOffset)
+		if hourTarget.After(now) {
+			return hourTarget
+		}
+		return hourTarget.Add(interval)
 	}
 	return now.Truncate(interval).Add(interval)
 }
