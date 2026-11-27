@@ -374,7 +374,12 @@ func TestSchedulerRoundsAndGlobalCursorProgression(t *testing.T) {
 	if err != nil || sent != 2 {
 		t.Fatalf("Round 1 RunOnce() = (%d, %v), want (2, nil)", sent, err)
 	}
-	if !strings.Contains(sender.messages[0].content, "Round 1") || !strings.HasPrefix(sender.messages[0].content, "<@&role-1>") {
+	wantStart := "Start: <t:" + itoa(base.Add(1*time.Hour).Unix()) + ":f> (<t:" + itoa(base.Add(1*time.Hour).Unix()) + ":R>)"
+	wantEnd := "End: <t:" + itoa(base.Add(25*time.Hour).Unix()) + ":f> (<t:" + itoa(base.Add(25*time.Hour).Unix()) + ":R>)"
+	if !strings.Contains(sender.messages[0].content, "Round 1") ||
+		!strings.HasPrefix(sender.messages[0].content, "<@&role-1>") ||
+		!strings.Contains(sender.messages[0].content, wantStart) ||
+		!strings.Contains(sender.messages[0].content, wantEnd) {
 		t.Errorf("unexpected guild 1 Round 1 message:\n%s", sender.messages[0].content)
 	}
 	if strings.Contains(sender.messages[1].content, "<@&") {

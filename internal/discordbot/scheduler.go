@@ -16,8 +16,6 @@ import (
 // DefaultInterval is the default schedule check interval (once per hour).
 const DefaultInterval = time.Hour
 
-const utcTimeLayout = "2006-01-02 15:04:05 UTC"
-
 // MessageSender sends a notification message to a Discord channel.
 type MessageSender interface {
 	SendChannelMessage(ctx context.Context, channelID, content, roleID string) error
@@ -230,9 +228,9 @@ func FormatChampionsRoundMessage(m mdbdiff.ChampionsRoundMilestone, roleID strin
 	if course := strings.TrimSpace(m.Course); course != "" {
 		fmt.Fprintf(&sb, "\nCourse: %s", course)
 	}
-	startUTC := m.StartTime.UTC()
-	endUTC := m.EndTime.UTC()
-	fmt.Fprintf(&sb, "\nStart: %s (<t:%d:R>)", startUTC.Format(utcTimeLayout), startUTC.Unix())
-	fmt.Fprintf(&sb, "\nEnd: %s (<t:%d:F>)", endUTC.Format(utcTimeLayout), endUTC.Unix())
+	startUnix := m.StartTime.UTC().Unix()
+	endUnix := m.EndTime.UTC().Unix()
+	fmt.Fprintf(&sb, "\nStart: <t:%d:f> (<t:%d:R>)", startUnix, startUnix)
+	fmt.Fprintf(&sb, "\nEnd: <t:%d:f> (<t:%d:R>)", endUnix, endUnix)
 	return sb.String()
 }
