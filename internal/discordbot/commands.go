@@ -20,7 +20,7 @@ type PermissionVerifier interface {
 	VerifyNotifyPermissions(ctx context.Context, guildID, channelID, roleID string, ix webhook.DiscordInteraction) error
 }
 
-// RegisterCommands attaches Discord slash-command handlers (such as /notify-channel)
+// RegisterCommands attaches Discord slash-command handlers (such as /notify-event)
 // to handler backed by store.
 func RegisterCommands(
 	handler *webhook.DiscordHandler,
@@ -36,7 +36,7 @@ func RegisterCommands(
 		nowFn = time.Now
 	}
 
-	handler.RegisterCommand("notify-channel", func(ctx context.Context, ix webhook.DiscordInteraction) webhook.DiscordInteractionResponse {
+	handler.RegisterCommand("notify-event", func(ctx context.Context, ix webhook.DiscordInteraction) webhook.DiscordInteractionResponse {
 		if strings.TrimSpace(ix.GuildID) == "" {
 			return ephemeralReply("This command can only be used inside a Discord server.")
 		}

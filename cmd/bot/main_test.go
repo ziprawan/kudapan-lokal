@@ -188,7 +188,7 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 		t.Fatalf("expected 503 when DISCORD_PUBLIC_KEY omitted, got %d", rec503.Code)
 	}
 
-	// Full wiring with discordbot.Store serves /api/webhook/telegram, /api/webhook/discord, and /notify-channel.
+	// Full wiring with discordbot.Store serves /api/webhook/telegram, /api/webhook/discord, and /notify-event.
 	dcStore, err := discordbot.OpenStore(filepath.Join(dir, "discord.db"))
 	if err != nil {
 		t.Fatalf("discordbot.OpenStore() error = %v", err)
@@ -219,7 +219,7 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 		t.Fatalf("POST /api/webhook/discord status=%d body=%s", dcRec.Code, dcRec.Body.String())
 	}
 
-	notifyBody := []byte(`{"id":"ix1","type":2,"guild_id":"guild-1","member":{"permissions":"8"},"data":{"name":"notify-channel","options":[{"name":"channel","type":7,"value":"chan-99"}]}}`)
+	notifyBody := []byte(`{"id":"ix1","type":2,"guild_id":"guild-1","member":{"permissions":"8"},"data":{"name":"notify-event","options":[{"name":"channel","type":7,"value":"chan-99"}]}}`)
 	notifySig := hex.EncodeToString(ed25519.Sign(priv, append([]byte(ts), notifyBody...)))
 	notifyReq := httptest.NewRequest(http.MethodPost, "/api/webhook/discord", bytes.NewReader(notifyBody))
 	notifyReq.Header.Set("X-Signature-Ed25519", notifySig)
@@ -228,9 +228,9 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 	fullSrv.Handler().ServeHTTP(notifyRec, notifyReq)
 	var notifyResp webhook.DiscordInteractionResponse
 	if err := json.Unmarshal(notifyRec.Body.Bytes(), &notifyResp); err != nil {
-		t.Fatalf("unmarshal /notify-channel response: %v (body=%s)", err, notifyRec.Body.String())
+		t.Fatalf("unmarshal /notify-event response: %v (body=%s)", err, notifyRec.Body.String())
 	}
 	if notifyRec.Code != http.StatusOK || notifyResp.Data == nil || !strings.Contains(notifyResp.Data.Content, "<#chan-99>") {
-		t.Fatalf("POST /notify-channel status=%d body=%s", notifyRec.Code, notifyRec.Body.String())
+		t.Fatalf("POST /notify-event status=%d body=%s", notifyRec.Code, notifyRec.Body.String())
 	}
 }

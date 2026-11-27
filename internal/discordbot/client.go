@@ -206,7 +206,7 @@ type applicationCommand struct {
 }
 
 // SyncCommands overwrites global Discord slash commands with /ping and
-// Administrator-only /notify-channel.
+// Administrator-only /notify-event.
 func (c *Client) SyncCommands(ctx context.Context) error {
 	adminPerm := strconv.FormatUint(PermAdministrator, 10)
 	dmFalse := false
@@ -216,7 +216,7 @@ func (c *Client) SyncCommands(ctx context.Context) error {
 			Description: "Check if the bot is responsive",
 		},
 		{
-			Name:                     "notify-channel",
+			Name:                     "notify-event",
 			Description:              "Set the channel (and optional role) for event notifications",
 			DefaultMemberPermissions: &adminPerm,
 			DMPermission:             &dmFalse,

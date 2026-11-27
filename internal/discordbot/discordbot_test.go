@@ -170,7 +170,7 @@ func TestNotifyChannelCommandAdminAndPermissions(t *testing.T) {
 		GuildID: "guild-1",
 		Member:  &webhook.DiscordInteractionMember{Permissions: strconv.FormatUint(PermViewChannel|PermSendMessages, 10)},
 		Data: &webhook.DiscordInteractionData{
-			Name:    "notify-channel",
+			Name:    "notify-event",
 			Options: []webhook.DiscordInteractionOption{{Name: "channel", Type: 7, Value: "chan-1"}},
 		},
 	})
@@ -189,7 +189,7 @@ func TestNotifyChannelCommandAdminAndPermissions(t *testing.T) {
 		GuildID: "guild-1",
 		Member:  &webhook.DiscordInteractionMember{Permissions: strconv.FormatUint(PermAdministrator, 10)},
 		Data: &webhook.DiscordInteractionData{
-			Name:    "notify-channel",
+			Name:    "notify-event",
 			Options: []webhook.DiscordInteractionOption{{Name: "channel", Type: 7, Value: "chan-1"}},
 		},
 	})
@@ -208,7 +208,7 @@ func TestNotifyChannelCommandAdminAndPermissions(t *testing.T) {
 		GuildID: "guild-1",
 		Member:  &webhook.DiscordInteractionMember{Permissions: strconv.FormatUint(PermAdministrator, 10)},
 		Data: &webhook.DiscordInteractionData{
-			Name: "notify-channel",
+			Name: "notify-event",
 			Options: []webhook.DiscordInteractionOption{
 				{Name: "channel", Type: 7, Value: "chan-1"},
 				{Name: "role", Type: 8, Value: "role-1"},
@@ -284,7 +284,7 @@ func TestClientSyncVerifyPermissionsAndSendMessage(t *testing.T) {
 	if err := client.SyncCommands(context.Background()); err != nil {
 		t.Fatalf("SyncCommands() error = %v", err)
 	}
-	if len(syncedBody) != 2 || syncedBody[1].Name != "notify-channel" ||
+	if len(syncedBody) != 2 || syncedBody[1].Name != "notify-event" ||
 		syncedBody[1].DefaultMemberPermissions == nil || *syncedBody[1].DefaultMemberPermissions != "8" {
 		t.Fatalf("unexpected synced commands: %+v", syncedBody)
 	}

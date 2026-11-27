@@ -292,7 +292,7 @@ func main() {
 				if err := dcClient.SyncCommands(syncCtx); err != nil {
 					logger.Printf("warning: failed to sync discord slash commands: %v", err)
 				} else {
-					logger.Printf("synced discord global slash commands (/ping, /notify-channel)")
+					logger.Printf("synced discord global slash commands (/ping, /notify-event)")
 				}
 				cancelSync()
 			}
