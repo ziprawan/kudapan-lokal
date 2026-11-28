@@ -233,4 +233,19 @@ func TestWebhookEnvAndServerWiring(t *testing.T) {
 	if notifyRec.Code != http.StatusOK || notifyResp.Data == nil || !strings.Contains(notifyResp.Data.Content, "<#chan-99>") {
 		t.Fatalf("POST /notify-event status=%d body=%s", notifyRec.Code, notifyRec.Body.String())
 	}
+
+	resBody := []byte(`{"id":"ix2","type":2,"guild_id":"guild-1","member":{"permissions":"8"},"data":{"name":"notify-resource","options":[{"name":"channel","type":7,"value":"chan-100"}]}}`)
+	resSig := hex.EncodeToString(ed25519.Sign(priv, append([]byte(ts), resBody...)))
+	resReq := httptest.NewRequest(http.MethodPost, "/api/webhook/discord", bytes.NewReader(resBody))
+	resReq.Header.Set("X-Signature-Ed25519", resSig)
+	resReq.Header.Set("X-Signature-Timestamp", ts)
+	resRec := httptest.NewRecorder()
+	fullSrv.Handler().ServeHTTP(resRec, resReq)
+	var resResp webhook.DiscordInteractionResponse
+	if err := json.Unmarshal(resRec.Body.Bytes(), &resResp); err != nil {
+		t.Fatalf("unmarshal /notify-resource response: %v (body=%s)", err, resRec.Body.String())
+	}
+	if resRec.Code != http.StatusOK || resResp.Data == nil || !strings.Contains(resResp.Data.Content, "<#chan-100>") {
+		t.Fatalf("POST /notify-resource status=%d body=%s", resRec.Code, resRec.Body.String())
+	}
 }

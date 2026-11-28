@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"kudapan_lokal/internal/webhook"
 )
@@ -18,6 +19,8 @@ import (
 const (
 	// DefaultDiscordAPIBase is the Discord REST API v10 base URL.
 	DefaultDiscordAPIBase = "https://discord.com/api/v10"
+	// MaxDiscordMessageRunes is Discord's per-message character limit.
+	MaxDiscordMessageRunes = 2000
 
 	// Discord permission bitflags.
 	PermAdministrator   uint64 = 1 << 3
@@ -206,10 +209,25 @@ type applicationCommand struct {
 }
 
 // SyncCommands overwrites global Discord slash commands with /ping and
-// Administrator-only /notify-event.
+// Administrator-only /notify-event and /notify-resource.
 func (c *Client) SyncCommands(ctx context.Context) error {
 	adminPerm := strconv.FormatUint(PermAdministrator, 10)
 	dmFalse := false
+	notifyOpts := []applicationCommandOption{
+		{
+			Type:         7, // CHANNEL
+			Name:         "channel",
+			Description:  "Target text or announcement channel for notifications",
+			Required:     true,
+			ChannelTypes: []int{0, 5}, // GUILD_TEXT, GUILD_ANNOUNCEMENT
+		},
+		{
+			Type:        8, // ROLE
+			Name:        "role",
+			Description: "Optional role to mention on notifications",
+			Required:    false,
+		},
+	}
 	cmds := []applicationCommand{
 		{
 			Name:        "ping",
@@ -220,21 +238,14 @@ func (c *Client) SyncCommands(ctx context.Context) error {
 			Description:              "Set the channel (and optional role) for event notifications",
 			DefaultMemberPermissions: &adminPerm,
 			DMPermission:             &dmFalse,
-			Options: []applicationCommandOption{
-				{
-					Type:         7, // CHANNEL
-					Name:         "channel",
-					Description:  "Target text or announcement channel for notifications",
-					Required:     true,
-					ChannelTypes: []int{0, 5}, // GUILD_TEXT, GUILD_ANNOUNCEMENT
-				},
-				{
-					Type:        8, // ROLE
-					Name:        "role",
-					Description: "Optional role to mention on notifications",
-					Required:    false,
-				},
-			},
+			Options:                  notifyOpts,
+		},
+		{
+			Name:                     "notify-resource",
+			Description:              "Set the channel (and optional role) for game resource update notifications",
+			DefaultMemberPermissions: &adminPerm,
+			DMPermission:             &dmFalse,
+			Options:                  notifyOpts,
 		},
 	}
 
@@ -324,8 +335,8 @@ type createMessageRequest struct {
 	AllowedMentions *allowedMentions `json:"allowed_mentions,omitempty"`
 }
 
-// SendChannelMessage posts content to channelID, explicitly scoping mentions
-// to roleID when non-empty.
+// SendChannelMessage posts content to channelID, splitting into <= 2000-rune
+// chunks when needed and explicitly scoping mentions to roleID on the first chunk.
 func (c *Client) SendChannelMessage(ctx context.Context, channelID, content, roleID string) error {
 	channelID = strings.TrimSpace(channelID)
 	roleID = strings.TrimSpace(roleID)
@@ -336,16 +347,104 @@ func (c *Client) SendChannelMessage(ctx context.Context, channelID, content, rol
 		return errors.New("discord message content cannot be empty")
 	}
 
-	am := &allowedMentions{Parse: []string{}}
-	if roleID != "" {
-		am.Roles = []string{roleID}
+	endpoint := fmt.Sprintf("%s/channels/%s/messages", c.baseURL, channelID)
+	chunks := splitDiscordMessage(content, MaxDiscordMessageRunes)
+	for i, chunk := range chunks {
+		am := &allowedMentions{Parse: []string{}}
+		if i == 0 && roleID != "" {
+			am.Roles = []string{roleID}
+		}
+		if err := c.doJSON(ctx, http.MethodPost, endpoint, createMessageRequest{
+			Content:         chunk,
+			AllowedMentions: am,
+		}, nil); err != nil {
+			if len(chunks) > 1 {
+				return fmt.Errorf("send discord chunk %d/%d: %w", i+1, len(chunks), err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func splitDiscordMessage(text string, maxRunes int) []string {
+	if maxRunes <= 0 {
+		maxRunes = MaxDiscordMessageRunes
+	}
+	if utf8.RuneCountInString(text) <= maxRunes {
+		return []string{text}
 	}
 
-	endpoint := fmt.Sprintf("%s/channels/%s/messages", c.baseURL, channelID)
-	return c.doJSON(ctx, http.MethodPost, endpoint, createMessageRequest{
-		Content:         content,
-		AllowedMentions: am,
-	}, nil)
+	blocks := strings.Split(text, "\n\n")
+	var chunks []string
+	var cur strings.Builder
+	curRunes := 0
+
+	flush := func() {
+		if cur.Len() > 0 {
+			chunks = append(chunks, cur.String())
+			cur.Reset()
+			curRunes = 0
+		}
+	}
+
+	appendLine := func(line string) {
+		lineRunes := utf8.RuneCountInString(line)
+		if lineRunes > maxRunes {
+			flush()
+			runes := []rune(line)
+			for len(runes) > 0 {
+				take := maxRunes
+				if len(runes) < take {
+					take = len(runes)
+				}
+				chunks = append(chunks, string(runes[:take]))
+				runes = runes[take:]
+			}
+			return
+		}
+		addRunes := lineRunes
+		if cur.Len() > 0 {
+			addRunes++
+		}
+		if curRunes+addRunes > maxRunes {
+			flush()
+		}
+		if cur.Len() > 0 {
+			cur.WriteByte('\n')
+			curRunes++
+		}
+		cur.WriteString(line)
+		curRunes += lineRunes
+	}
+
+	for _, block := range blocks {
+		blockRunes := utf8.RuneCountInString(block)
+		sepRunes := 0
+		if cur.Len() > 0 {
+			sepRunes = 2
+		}
+		if curRunes+sepRunes+blockRunes <= maxRunes {
+			if cur.Len() > 0 {
+				cur.WriteString("\n\n")
+				curRunes += 2
+			}
+			cur.WriteString(block)
+			curRunes += blockRunes
+			continue
+		}
+		if blockRunes <= maxRunes {
+			flush()
+			cur.WriteString(block)
+			curRunes = blockRunes
+			continue
+		}
+		for _, line := range strings.Split(block, "\n") {
+			appendLine(line)
+		}
+	}
+	flush()
+	return chunks
 }
 
 func (c *Client) doJSON(ctx context.Context, method, url string, reqBody, respOut any) error {

@@ -379,19 +379,51 @@ func loadChampionsCourseMap(db *sql.DB) (map[int64]string, error) {
 		}
 	}
 
+	rcsCols, _, err := tableMeta(db, "race_course_set")
+	if err != nil {
+		return nil, err
+	}
+	colSet := make(map[string]bool, len(rcsCols))
+	for _, c := range rcsCols {
+		colSet[c.Name] = true
+	}
+	inoutExpr := "0"
+	if colSet["inout"] {
+		inoutExpr = "rcs.inout"
+	}
+	turnExpr := "0"
+	if colSet["turn"] {
+		turnExpr = "rcs.turn"
+	}
+
+	hasRaceCond, err := tableExists(db, "race_condition")
+	if err != nil {
+		return nil, err
+	}
+	condJoin := ""
+	condCols := "0, 0, 0"
+	if hasRaceCond {
+		condJoin = "LEFT JOIN race_condition rc ON rc.id = crc.race_condition_id"
+		condCols = "COALESCE(rc.season, 0), COALESCE(rc.weather, 0), COALESCE(rc.ground, 0)"
+	}
+
 	texts, err := loadTextLookup(db, textCategoryRaceTrack)
 	if err != nil {
 		return nil, err
 	}
 	tracks := texts[textCategoryRaceTrack]
 
-	rows, err := db.Query(`
-		SELECT crc.champions_id, rcs.race_track_id, rcs.ground, rcs.distance
+	query := fmt.Sprintf(`
+		SELECT crc.champions_id, rcs.race_track_id, rcs.ground, rcs.distance, %s, %s, %s
 		FROM champions_race_condition crc
 		JOIN race_instance ri ON ri.id = crc.race_instance_id
 		JOIN race r ON r.id = ri.race_id
 		JOIN race_course_set rcs ON rcs.id = r.course_set
-		ORDER BY crc.champions_id ASC, crc.round_id ASC`)
+		%s
+		ORDER BY crc.champions_id ASC, crc.round_id ASC`,
+		inoutExpr, turnExpr, condCols, condJoin)
+
+	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("query champions race courses: %w", err)
 	}
@@ -400,11 +432,11 @@ func loadChampionsCourseMap(db *sql.DB) (map[int64]string, error) {
 	seen := make(map[int64]map[string]struct{})
 	lists := make(map[int64][]string)
 	for rows.Next() {
-		var champID, trackID, ground, distance int64
-		if err := rows.Scan(&champID, &trackID, &ground, &distance); err != nil {
+		var champID, trackID, ground, distance, inout, turn, season, weather, condGround int64
+		if err := rows.Scan(&champID, &trackID, &ground, &distance, &inout, &turn, &season, &weather, &condGround); err != nil {
 			return nil, err
 		}
-		label := formatCourseLabel(tracks[trackID], trackID, ground, distance)
+		label := formatCourseLabel(tracks[trackID], trackID, ground, distance, inout, turn, season, weather, condGround)
 		if seen[champID] == nil {
 			seen[champID] = make(map[string]struct{})
 		}
@@ -422,22 +454,77 @@ func loadChampionsCourseMap(db *sql.DB) (map[int64]string, error) {
 	return out, nil
 }
 
-func formatCourseLabel(trackName string, trackID, ground, distance int64) string {
+func formatCourseLabel(trackName string, trackID, surfaceCode, distance, inout, turn, season, weather, condGround int64) string {
 	track := strings.TrimSpace(trackName)
 	if track == "" {
 		track = fmt.Sprintf("Track %d", trackID)
 	}
-	var surface string
-	switch ground {
+
+	parts := []string{track}
+	switch surfaceCode {
 	case 1:
-		surface = "Turf"
+		parts = append(parts, "Turf")
 	case 2:
-		surface = "Dirt"
+		parts = append(parts, "Dirt")
 	}
-	if surface != "" {
-		return fmt.Sprintf("%s %s %dm", track, surface, distance)
+	parts = append(parts, fmt.Sprintf("%dm", distance))
+
+	switch inout {
+	case 2:
+		parts = append(parts, "Inner")
+	case 3:
+		parts = append(parts, "Outer")
+	case 4:
+		parts = append(parts, "Outer→Inner")
 	}
-	return fmt.Sprintf("%s %dm", track, distance)
+
+	switch turn {
+	case 1:
+		parts = append(parts, "Right")
+	case 2:
+		parts = append(parts, "Left")
+	case 4:
+		parts = append(parts, "Straight")
+	}
+
+	base := strings.Join(parts, " ")
+
+	var conds []string
+	switch season {
+	case 1, 5:
+		conds = append(conds, "Spring")
+	case 2:
+		conds = append(conds, "Summer")
+	case 3:
+		conds = append(conds, "Fall")
+	case 4:
+		conds = append(conds, "Winter")
+	}
+	switch weather {
+	case 1:
+		conds = append(conds, "Sunny")
+	case 2:
+		conds = append(conds, "Cloudy")
+	case 3:
+		conds = append(conds, "Rainy")
+	case 4:
+		conds = append(conds, "Snowy")
+	}
+	switch condGround {
+	case 1:
+		conds = append(conds, "Firm")
+	case 2:
+		conds = append(conds, "Good")
+	case 3:
+		conds = append(conds, "Soft")
+	case 4:
+		conds = append(conds, "Heavy")
+	}
+
+	if len(conds) > 0 {
+		return fmt.Sprintf("%s (%s)", base, strings.Join(conds, ", "))
+	}
+	return base
 }
 
 func colInt64(vals []any, colIndex map[string]int, name string) (int64, bool) {

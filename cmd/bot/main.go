@@ -23,6 +23,7 @@ import (
 
 	"kudapan_lokal/internal/discordbot"
 	"kudapan_lokal/internal/masterdb"
+	"kudapan_lokal/internal/mdbdiff"
 	"kudapan_lokal/internal/notify"
 	"kudapan_lokal/internal/savedata"
 	"kudapan_lokal/internal/umaclient"
@@ -234,33 +235,8 @@ func main() {
 		chatSender = tg
 	}
 
-	svc, err := watcher.New(watcher.Config{
-		StatePath:        *statePath,
-		MasterDBPath:     *dbPath,
-		SeedMasterDBPath: *seedDBPath,
-		Interval:         *interval,
-		CheckOnStart:     true,
-		Verbose:          *verbose,
-	}, store, recv, notifier, watcher.WithLogger(logger))
-	if err != nil {
-		logger.Fatalf("init watcher: %v", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	if *once {
-		started := time.Now()
-		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-
-		res, err := svc.RunOnce(checkCtx)
-		if err != nil {
-			logger.Fatalf("check failed (after %s): %v", time.Since(started).Round(time.Millisecond), err)
-		}
-		svc.LogCheckResult(res, time.Since(started).Round(time.Millisecond))
-		return
-	}
 
 	var (
 		dcStore    *discordbot.Store
@@ -287,12 +263,12 @@ func main() {
 				logger.Fatalf("init discord client: %v", err)
 			}
 			dcVerifier = dcClient
-			if !*dryRun {
+			if !*once && !*dryRun {
 				syncCtx, cancelSync := context.WithTimeout(ctx, 20*time.Second)
 				if err := dcClient.SyncCommands(syncCtx); err != nil {
 					logger.Printf("warning: failed to sync discord slash commands: %v", err)
 				} else {
-					logger.Printf("synced discord global slash commands (/ping, /notify-event)")
+					logger.Printf("synced discord global slash commands (/ping, /notify-event, /notify-resource)")
 				}
 				cancelSync()
 			}
@@ -303,15 +279,48 @@ func main() {
 		} else if dcClient != nil {
 			dcSender = dcClient
 		}
-		if dcSender != nil {
-			dcSched, err = discordbot.NewScheduler(discordbot.SchedulerConfig{
-				MasterDBPath: *dbPath,
-				Interval:     *interval,
-				CheckOnStart: true,
-			}, dcStore, dcSender, discordbot.WithLogger(logger))
-			if err != nil {
-				logger.Fatalf("init discord scheduler: %v", err)
-			}
+	}
+
+	svcOpts := []watcher.Option{watcher.WithLogger(logger)}
+	if dcStore != nil && dcSender != nil {
+		svcOpts = append(svcOpts, watcher.WithOnUpdate(func(cbCtx context.Context, _, _ string, diff *mdbdiff.DiffResult, _ time.Time) {
+			discordbot.BroadcastResourceUpdate(cbCtx, dcStore, dcSender, diff, logger)
+		}))
+	}
+
+	svc, err := watcher.New(watcher.Config{
+		StatePath:        *statePath,
+		MasterDBPath:     *dbPath,
+		SeedMasterDBPath: *seedDBPath,
+		Interval:         *interval,
+		CheckOnStart:     true,
+		Verbose:          *verbose,
+	}, store, recv, notifier, svcOpts...)
+	if err != nil {
+		logger.Fatalf("init watcher: %v", err)
+	}
+
+	if *once {
+		started := time.Now()
+		checkCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+
+		res, err := svc.RunOnce(checkCtx)
+		if err != nil {
+			logger.Fatalf("check failed (after %s): %v", time.Since(started).Round(time.Millisecond), err)
+		}
+		svc.LogCheckResult(res, time.Since(started).Round(time.Millisecond))
+		return
+	}
+
+	if dcStore != nil && dcSender != nil {
+		dcSched, err = discordbot.NewScheduler(discordbot.SchedulerConfig{
+			MasterDBPath: *dbPath,
+			Interval:     *interval,
+			CheckOnStart: true,
+		}, dcStore, dcSender, discordbot.WithLogger(logger))
+		if err != nil {
+			logger.Fatalf("init discord scheduler: %v", err)
 		}
 	}
 

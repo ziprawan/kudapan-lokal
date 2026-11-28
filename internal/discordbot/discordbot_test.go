@@ -21,6 +21,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"kudapan_lokal/internal/mdbdiff"
 	"kudapan_lokal/internal/webhook"
 )
 
@@ -49,10 +50,12 @@ type sentMessage struct {
 type fakeSender struct {
 	messages []sentMessage
 	failOn   int
+	attempts int
 }
 
 func (f *fakeSender) SendChannelMessage(_ context.Context, channelID, content, roleID string) error {
-	if f.failOn > 0 && len(f.messages)+1 == f.failOn {
+	f.attempts++
+	if f.failOn > 0 && f.attempts == f.failOn {
 		return errors.New("simulated discord send error")
 	}
 	f.messages = append(f.messages, sentMessage{
@@ -111,6 +114,18 @@ func TestStoreGuildsAndEventTracker(t *testing.T) {
 	}
 	if len(guilds) != 2 || guilds[0].GuildID != "g1" || guilds[0].ChannelID != "c1-new" || guilds[0].RoleID != "r1-new" || guilds[1].GuildID != "g2" {
 		t.Fatalf("unexpected ListGuilds(): %+v", guilds)
+	}
+
+	if _, err := store.UpsertResourceGuild(context.Background(), "g1", "rc1", "rr1"); err != nil {
+		t.Fatalf("UpsertResourceGuild(g1) error = %v", err)
+	}
+	resGuilds, err := store.ListResourceGuilds(context.Background())
+	if err != nil || len(resGuilds) != 1 || resGuilds[0].ChannelID != "rc1" || resGuilds[0].RoleID != "rr1" {
+		t.Fatalf("unexpected ListResourceGuilds(): (%+v, %v)", resGuilds, err)
+	}
+	// Ensure resource guilds did not alter event guilds.
+	if guildsAfter, _ := store.ListGuilds(context.Background()); len(guildsAfter) != 2 || guildsAfter[0].ChannelID != "c1-new" {
+		t.Fatalf("expected discord_guilds to remain independent, got %+v", guildsAfter)
 	}
 }
 
@@ -284,8 +299,9 @@ func TestClientSyncVerifyPermissionsAndSendMessage(t *testing.T) {
 	if err := client.SyncCommands(context.Background()); err != nil {
 		t.Fatalf("SyncCommands() error = %v", err)
 	}
-	if len(syncedBody) != 2 || syncedBody[1].Name != "notify-event" ||
-		syncedBody[1].DefaultMemberPermissions == nil || *syncedBody[1].DefaultMemberPermissions != "8" {
+	if len(syncedBody) != 3 || syncedBody[1].Name != "notify-event" || syncedBody[2].Name != "notify-resource" ||
+		syncedBody[1].DefaultMemberPermissions == nil || *syncedBody[1].DefaultMemberPermissions != "8" ||
+		syncedBody[2].DefaultMemberPermissions == nil || *syncedBody[2].DefaultMemberPermissions != "8" {
 		t.Fatalf("unexpected synced commands: %+v", syncedBody)
 	}
 
@@ -427,6 +443,272 @@ func TestSchedulerRoundsAndGlobalCursorProgression(t *testing.T) {
 	}
 	if id, _, _ := store.LastNotifiedID(context.Background(), EventTypeChampionsMeeting); id != 6 {
 		t.Errorf("cursor after Round 3.3 = %d, want 6", id)
+	}
+}
+
+func TestNotifyResourceCommandAdminAndPermissions(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "discord.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey() error = %v", err)
+	}
+	verifier := &fakeVerifier{}
+	dcHandler, err := webhook.NewDiscordHandler(webhook.DiscordConfig{
+		PublicKey: pub,
+		Logger:    log.New(io.Discard, "", 0),
+	})
+	if err != nil {
+		t.Fatalf("NewDiscordHandler() error = %v", err)
+	}
+	RegisterCommands(dcHandler, store, verifier, "", time.Now)
+
+	send := func(ix webhook.DiscordInteraction) webhook.DiscordInteractionResponse {
+		body, _ := json.Marshal(ix)
+		ts := "1700000000"
+		sig := hex.EncodeToString(ed25519.Sign(priv, append([]byte(ts), body...)))
+		req := httptest.NewRequest(http.MethodPost, "/api/webhook/discord", bytes.NewReader(body))
+		req.Header.Set("X-Signature-Ed25519", sig)
+		req.Header.Set("X-Signature-Timestamp", ts)
+		rec := httptest.NewRecorder()
+		dcHandler.ServeHTTP(rec, req)
+		var resp webhook.DiscordInteractionResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		return resp
+	}
+
+	nonAdmin := send(webhook.DiscordInteraction{
+		ID:      "r1",
+		Type:    webhook.DiscordInteractionApplicationCommand,
+		GuildID: "guild-1",
+		Member:  &webhook.DiscordInteractionMember{Permissions: strconv.FormatUint(PermSendMessages, 10)},
+		Data: &webhook.DiscordInteractionData{
+			Name:    "notify-resource",
+			Options: []webhook.DiscordInteractionOption{{Name: "channel", Type: 7, Value: "chan-res"}},
+		},
+	})
+	if nonAdmin.Data == nil || !strings.Contains(nonAdmin.Data.Content, "Only server administrators") {
+		t.Fatalf("expected non-admin rejection, got %+v", nonAdmin)
+	}
+
+	verifier.err = errors.New("bot lacks View Channel")
+	permFail := send(webhook.DiscordInteraction{
+		ID:      "r2",
+		Type:    webhook.DiscordInteractionApplicationCommand,
+		GuildID: "guild-1",
+		Member:  &webhook.DiscordInteractionMember{Permissions: strconv.FormatUint(PermAdministrator, 10)},
+		Data: &webhook.DiscordInteractionData{
+			Name:    "notify-resource",
+			Options: []webhook.DiscordInteractionOption{{Name: "channel", Type: 7, Value: "chan-res"}},
+		},
+	})
+	if permFail.Data == nil || !strings.Contains(permFail.Data.Content, "Permission check failed") {
+		t.Fatalf("expected permission failure, got %+v", permFail)
+	}
+	if got, _ := store.ListResourceGuilds(context.Background()); len(got) != 0 {
+		t.Fatalf("expected empty resource guilds on permission failure, got %+v", got)
+	}
+
+	verifier.err = nil
+	okResp := send(webhook.DiscordInteraction{
+		ID:      "r3",
+		Type:    webhook.DiscordInteractionApplicationCommand,
+		GuildID: "guild-1",
+		Member:  &webhook.DiscordInteractionMember{Permissions: strconv.FormatUint(PermAdministrator, 10)},
+		Data: &webhook.DiscordInteractionData{
+			Name: "notify-resource",
+			Options: []webhook.DiscordInteractionOption{
+				{Name: "channel", Type: 7, Value: "chan-res"},
+				{Name: "role", Type: 8, Value: "role-res"},
+			},
+		},
+	})
+	if okResp.Data == nil || !strings.Contains(okResp.Data.Content, "<#chan-res>") || !strings.Contains(okResp.Data.Content, "<@&role-res>") {
+		t.Fatalf("unexpected success reply: %+v", okResp)
+	}
+	got, err := store.ListResourceGuilds(context.Background())
+	if err != nil || len(got) != 1 || got[0].ChannelID != "chan-res" || got[0].RoleID != "role-res" {
+		t.Fatalf("unexpected ListResourceGuilds(): (%+v, %v)", got, err)
+	}
+	if eventGuilds, _ := store.ListGuilds(context.Background()); len(eventGuilds) != 0 {
+		t.Fatalf("expected /notify-event guilds untouched, got %+v", eventGuilds)
+	}
+}
+
+func TestFormatResourceUpdateMessageAndStartTimeOrder(t *testing.T) {
+	if msg, ok := FormatResourceUpdateMessage(nil, ""); ok || msg != "" {
+		t.Fatalf("expected nil diff -> empty, got (%q, %v)", msg, ok)
+	}
+
+	// Deleted-only diff should produce no notification.
+	deletedOnly := &mdbdiff.DiffResult{
+		Scenario: mdbdiff.ScenarioDiff{
+			Deleted: []mdbdiff.ScenarioEvent{{ID: 1, Title: "Old"}},
+		},
+		Campaign: mdbdiff.CampaignDiff{
+			Deleted: []mdbdiff.CampaignEvent{{CampaignID: 2, Description: "Expired"}},
+		},
+	}
+	if msg, ok := FormatResourceUpdateMessage(deletedOnly, "123"); ok || msg != "" {
+		t.Fatalf("expected delete-only diff -> empty, got (%q, %v)", msg, ok)
+	}
+
+	t0 := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	diff := &mdbdiff.DiffResult{
+		Scenario: mdbdiff.ScenarioDiff{
+			Added: []mdbdiff.ScenarioEvent{
+				{ID: 10, Title: "Later\nScenario", StartTime: t0.Add(48 * time.Hour), EndTime: t0.Add(100 * time.Hour)},
+				{ID: 20, Title: "Earlier\nScenario", StartTime: t0.Add(12 * time.Hour), EndTime: t0.Add(100 * time.Hour)},
+			},
+		},
+		Champions: mdbdiff.ChampionsDiff{
+			Added: []mdbdiff.ChampionsScheduleEvent{
+				{ID: 22, Title: "Aquarius Cup", Course: "Tokyo Dirt 1600m Left (Winter, Snowy, Soft)", StartTime: t0.Add(24 * time.Hour), EndTime: t0.Add(120 * time.Hour)},
+			},
+		},
+		Announce: mdbdiff.AnnounceDiff{
+			Added: []mdbdiff.AnnounceEvent{
+				{ID: 30010, AnnounceType: mdbdiff.AnnounceTypeCharacter, Title: "[Beyond the Horizon] Tokai Teio", StartTime: t0.Add(30 * time.Hour), EndTime: t0.Add(200 * time.Hour)},
+			},
+			Changed: []mdbdiff.EntryChange[mdbdiff.AnnounceEvent]{
+				{
+					New: mdbdiff.AnnounceEvent{ID: 30005, AnnounceType: mdbdiff.AnnounceTypeSupportCard, Title: "[Fire at My Heels] Kitasan Black", StartTime: t0.Add(10 * time.Hour), EndTime: t0.Add(150 * time.Hour)},
+				},
+			},
+		},
+		StoryEvent: mdbdiff.StoryEventDiff{
+			Added: []mdbdiff.StoryEvent{
+				{ID: 1023, Title: "Leap into a New World!", StartTime: t0.Add(5 * time.Hour), EndTime: t0.Add(300 * time.Hour)},
+			},
+		},
+		Campaign: mdbdiff.CampaignDiff{
+			Added: []mdbdiff.CampaignEvent{
+				{CampaignID: 50, Title: "Daily Bonus", Description: "Earn 2x rewards in Daily Races!", StartTime: t0.Add(6 * time.Hour), EndTime: t0.Add(72 * time.Hour)},
+			},
+		},
+	}
+
+	msg, ok := FormatResourceUpdateMessage(diff, "role-99")
+	if !ok {
+		t.Fatal("expected ok=true for non-empty diff")
+	}
+
+	// Verify role tag, top heading, section aliases, and section order.
+	wantOrder := []string{
+		"<@&role-99>",
+		"# Game Resource Update Detected!",
+		"## Scenario",
+		"## Champions Meeting",
+		"## Gacha Banner",
+		"## Event Story",
+		"## Campaign",
+	}
+	lastPos := -1
+	for _, token := range wantOrder {
+		idx := strings.Index(msg, token)
+		if idx <= lastPos {
+			t.Fatalf("token %q missing or out of order (idx=%d, lastPos=%d):\n%s", token, idx, lastPos, msg)
+		}
+		lastPos = idx
+	}
+
+	// Verify Scenario sorted by StartTime (Earlier Scenario ID=20 before Later Scenario ID=10) and omits end time.
+	idxEarlier := strings.Index(msg, "**Earlier Scenario**")
+	idxLater := strings.Index(msg, "**Later Scenario**")
+	if idxEarlier < 0 || idxLater <= idxEarlier {
+		t.Errorf("Scenario items not sorted by StartTime ascending:\n%s", msg)
+	}
+	scenarioSection := strings.Split(msg, "## Champions Meeting")[0]
+	if strings.Contains(scenarioSection, "–") {
+		t.Errorf("Scenario section must only show start time, not end time:\n%s", scenarioSection)
+	}
+
+	// Verify Gacha Banner sorted by StartTime (Support Card ID=30005 at +10h before Character ID=30010 at +30h) and marks (Updated).
+	idxSupp := strings.Index(msg, "**[Support Card]** [Fire at My Heels] Kitasan Black (Updated)")
+	idxChar := strings.Index(msg, "**[Character]** [Beyond the Horizon] Tokai Teio")
+	if idxSupp < 0 || idxChar <= idxSupp {
+		t.Errorf("Gacha Banner items missing or not sorted by StartTime ascending:\n%s", msg)
+	}
+
+	// Verify CM course summary and Campaign description (category 188).
+	if !strings.Contains(msg, "Tokyo Dirt 1600m Left (Winter, Snowy, Soft)") ||
+		!strings.Contains(msg, "**Earn 2x rewards in Daily Races!**") {
+		t.Errorf("missing expected CM course or Campaign description:\n%s", msg)
+	}
+}
+
+func TestBroadcastResourceUpdateAndChunking(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenStore(filepath.Join(dir, "discord.db"))
+	if err != nil {
+		t.Fatalf("OpenStore() error = %v", err)
+	}
+	defer store.Close()
+
+	_, _ = store.UpsertResourceGuild(context.Background(), "g1", "c1", "r1")
+	_, _ = store.UpsertResourceGuild(context.Background(), "g2", "c2", "")
+
+	now := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
+	diff := &mdbdiff.DiffResult{
+		StoryEvent: mdbdiff.StoryEventDiff{
+			Added: []mdbdiff.StoryEvent{
+				{ID: 1023, Title: "Leap into a New World!", StartTime: now, EndTime: now.Add(24 * time.Hour)},
+			},
+		},
+	}
+
+	// Fail first guild delivery and verify second guild still receives notification.
+	sender := &fakeSender{failOn: 1}
+	sent := BroadcastResourceUpdate(context.Background(), store, sender, diff, log.New(io.Discard, "", 0))
+	if sent != 1 || len(sender.messages) != 1 || sender.messages[0].channelID != "c2" {
+		t.Fatalf("BroadcastResourceUpdate fault isolation unexpected: sent=%d msgs=%+v", sent, sender.messages)
+	}
+
+	// Verify SendChannelMessage chunks payloads > 2000 runes and sends allowed_mentions.roles only on first chunk.
+	var requests []createMessageRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var req createMessageRequest
+		if err := json.Unmarshal(raw, &req); err != nil {
+			t.Fatalf("unmarshal req: %v", err)
+		}
+		requests = append(requests, req)
+		_, _ = w.Write([]byte(`{"id":"m1"}`))
+	}))
+	defer srv.Close()
+
+	client, err := NewClient("app-1", "bot-secret", WithBaseURL(srv.URL), WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	var blocks []string
+	for i := 0; i < 40; i++ {
+		blocks = append(blocks, strings.Repeat("x", 80))
+	}
+	longContent := strings.Join(blocks, "\n\n")
+	if err := client.SendChannelMessage(context.Background(), "c1", longContent, "r1"); err != nil {
+		t.Fatalf("SendChannelMessage(long) error = %v", err)
+	}
+	if len(requests) < 2 {
+		t.Fatalf("expected >= 2 chunks for long Discord message, got %d", len(requests))
+	}
+	for i, req := range requests {
+		if len([]rune(req.Content)) > MaxDiscordMessageRunes {
+			t.Errorf("chunk %d exceeds %d runes", i, MaxDiscordMessageRunes)
+		}
+		if i == 0 && (req.AllowedMentions == nil || len(req.AllowedMentions.Roles) != 1 || req.AllowedMentions.Roles[0] != "r1") {
+			t.Errorf("chunk 0 missing role mention allowance: %+v", req.AllowedMentions)
+		}
+		if i > 0 && req.AllowedMentions != nil && len(req.AllowedMentions.Roles) != 0 {
+			t.Errorf("chunk %d should not repeat role mentions: %+v", i, req.AllowedMentions)
+		}
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"kudapan_lokal/internal/masterdb"
+	"kudapan_lokal/internal/mdbdiff"
 	"kudapan_lokal/internal/savedata"
 )
 
@@ -414,9 +415,63 @@ func TestWatcherSecondMessageIncludesAnnounceData(t *testing.T) {
 		"[Fire at My Heels] Kitasan Black",
 		"Type: Support Card",
 	} {
-		if !strings.Contains(msg2, want) {
+	if !strings.Contains(msg2, want) {
 			t.Errorf("second message missing %q:\n%s", want, msg2)
 		}
+	}
+}
+
+func TestWatcherOnUpdateCallback(t *testing.T) {
+	dir := t.TempDir()
+	store, err := savedata.LoadOrInit(filepath.Join(dir, "savedata.json"))
+	if err != nil {
+		t.Fatalf("LoadOrInit() error = %v", err)
+	}
+
+	seedDB := filepath.Join(dir, "seed.mdb")
+	newDB := filepath.Join(dir, "server_v2.mdb")
+	now := time.Date(2026, 11, 22, 0, 0, 0, 0, time.UTC)
+
+	createWatcherTestDB(t, seedDB, false)
+	createWatcherTestDB(t, newDB, true)
+
+	fetcher := &fakeFetcher{resVer: "10008900", srcDB: newDB}
+	notifier := &fakeNotifier{}
+	var callbackCalls int
+	var gotNewVer string
+
+	svc, err := New(Config{
+		StatePath:        filepath.Join(dir, "state.json"),
+		MasterDBPath:     filepath.Join(dir, "master.mdb"),
+		SeedMasterDBPath: seedDB,
+		Interval:         time.Hour,
+	}, store, fetcher, notifier,
+		WithClock(func() time.Time { return now }),
+		WithOnUpdate(func(_ context.Context, _, newResVer string, diff *mdbdiff.DiffResult, _ time.Time) {
+			callbackCalls++
+			gotNewVer = newResVer
+			if diff == nil || len(diff.Campaign.Added) != 1 {
+				t.Errorf("unexpected callback diff: %+v", diff)
+			}
+		}),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(update) error = %v", err)
+	}
+	if callbackCalls != 1 || gotNewVer != "10008900" {
+		t.Fatalf("callbackCalls=%d gotNewVer=%q, want 1 and 10008900", callbackCalls, gotNewVer)
+	}
+
+	// Unchanged RES-VER must not re-invoke callback.
+	if _, err := svc.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce(unchanged) error = %v", err)
+	}
+	if callbackCalls != 1 {
+		t.Fatalf("callbackCalls after unchanged check = %d, want 1", callbackCalls)
 	}
 }
 

@@ -54,12 +54,17 @@ type CheckResult struct {
 	SentMessages        []string
 }
 
+// UpdateCallback is invoked after a master.mdb update is diffed and primary
+// notifications succeed, prior to promoting the new baseline.
+type UpdateCallback func(ctx context.Context, oldResVer, newResVer string, diff *mdbdiff.DiffResult, checkedAt time.Time)
+
 // Service coordinates periodic RES-VER checks, master.mdb diffing, and notifications.
 type Service struct {
 	cfg      Config
 	store    *savedata.Store
 	fetcher  MasterFetcher
 	notifier notify.Notifier
+	onUpdate UpdateCallback
 	logger   *log.Logger
 	now      func() time.Time
 }
@@ -81,6 +86,15 @@ func WithClock(now func() time.Time) Option {
 	return func(s *Service) {
 		if now != nil {
 			s.now = now
+		}
+	}
+}
+
+// WithOnUpdate registers a callback invoked whenever master.mdb updates.
+func WithOnUpdate(fn UpdateCallback) Option {
+	return func(s *Service) {
+		if fn != nil {
+			s.onUpdate = fn
 		}
 	}
 }
@@ -348,6 +362,10 @@ func (s *Service) RunOnce(ctx context.Context) (*CheckResult, error) {
 	scheduleMsg, scheduleOK := notify.FormatScheduleMessage(diff.Scenario, diff.Champions, diff.StoryEvent, checkedAt)
 	if err := sendOptional("single_mode_scenario/champions_schedule", scheduleMsg, scheduleOK); err != nil {
 		return nil, err
+	}
+
+	if s.onUpdate != nil {
+		s.onUpdate(ctx, oldResVer, info.ResourceVersion, diff, checkedAt)
 	}
 
 	if err := os.Rename(stagingPath, s.cfg.MasterDBPath); err != nil {

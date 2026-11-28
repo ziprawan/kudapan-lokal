@@ -21,6 +21,9 @@ const (
 	DefaultDBPath = "data/discord.db"
 	// EventTypeChampionsMeeting identifies the Champions Meeting tracker entry.
 	EventTypeChampionsMeeting = "champions_meeting"
+
+	tableDiscordGuilds         = "discord_guilds"
+	tableDiscordResourceGuilds = "discord_resource_guilds"
 )
 
 // GuildConfig represents a Discord server's configured notification destination.
@@ -83,6 +86,12 @@ func OpenStore(dbPath string, opts ...StoreOption) (*Store, error) {
 			role_id    TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS discord_resource_guilds (
+			guild_id   TEXT PRIMARY KEY,
+			channel_id TEXT NOT NULL,
+			role_id    TEXT NOT NULL DEFAULT '',
+			updated_at INTEGER NOT NULL
+		)`,
 		`CREATE TABLE IF NOT EXISTS event_tracker (
 			event_type       TEXT PRIMARY KEY,
 			last_notified_id INTEGER NOT NULL,
@@ -116,8 +125,31 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// UpsertGuild saves or replaces the notification channel and optional role for guildID.
+// UpsertGuild saves or replaces the event notification channel and optional role for guildID.
 func (s *Store) UpsertGuild(ctx context.Context, guildID, channelID, roleID string) (GuildConfig, error) {
+	return s.upsertGuildTable(ctx, tableDiscordGuilds, guildID, channelID, roleID)
+}
+
+// ListGuilds returns all configured event notification Discord guilds ordered by guild_id.
+func (s *Store) ListGuilds(ctx context.Context) ([]GuildConfig, error) {
+	return s.listGuildTable(ctx, tableDiscordGuilds)
+}
+
+// UpsertResourceGuild saves or replaces the game resource update notification
+// channel and optional role for guildID.
+func (s *Store) UpsertResourceGuild(ctx context.Context, guildID, channelID, roleID string) (GuildConfig, error) {
+	return s.upsertGuildTable(ctx, tableDiscordResourceGuilds, guildID, channelID, roleID)
+}
+
+// ListResourceGuilds returns all Discord guilds configured for game resource updates ordered by guild_id.
+func (s *Store) ListResourceGuilds(ctx context.Context) ([]GuildConfig, error) {
+	return s.listGuildTable(ctx, tableDiscordResourceGuilds)
+}
+
+func (s *Store) upsertGuildTable(ctx context.Context, table, guildID, channelID, roleID string) (GuildConfig, error) {
+	if table != tableDiscordGuilds && table != tableDiscordResourceGuilds {
+		return GuildConfig{}, fmt.Errorf("unsupported guild table %q", table)
+	}
 	guildID = strings.TrimSpace(guildID)
 	channelID = strings.TrimSpace(channelID)
 	roleID = strings.TrimSpace(roleID)
@@ -129,17 +161,15 @@ func (s *Store) UpsertGuild(ctx context.Context, guildID, channelID, roleID stri
 	}
 
 	nowUTC := s.now().UTC()
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO discord_guilds (guild_id, channel_id, role_id, updated_at)
+	query := fmt.Sprintf(`
+		INSERT INTO %s (guild_id, channel_id, role_id, updated_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(guild_id) DO UPDATE SET
 			channel_id = excluded.channel_id,
 			role_id    = excluded.role_id,
-			updated_at = excluded.updated_at`,
-		guildID, channelID, roleID, nowUTC.Unix(),
-	)
-	if err != nil {
-		return GuildConfig{}, fmt.Errorf("upsert discord guild %q: %w", guildID, err)
+			updated_at = excluded.updated_at`, table)
+	if _, err := s.db.ExecContext(ctx, query, guildID, channelID, roleID, nowUTC.Unix()); err != nil {
+		return GuildConfig{}, fmt.Errorf("upsert %s %q: %w", table, guildID, err)
 	}
 
 	return GuildConfig{
@@ -150,14 +180,17 @@ func (s *Store) UpsertGuild(ctx context.Context, guildID, channelID, roleID stri
 	}, nil
 }
 
-// ListGuilds returns all configured Discord guilds ordered by guild_id.
-func (s *Store) ListGuilds(ctx context.Context) ([]GuildConfig, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Store) listGuildTable(ctx context.Context, table string) ([]GuildConfig, error) {
+	if table != tableDiscordGuilds && table != tableDiscordResourceGuilds {
+		return nil, fmt.Errorf("unsupported guild table %q", table)
+	}
+	query := fmt.Sprintf(`
 		SELECT guild_id, channel_id, role_id, updated_at
-		FROM discord_guilds
-		ORDER BY guild_id ASC`)
+		FROM %s
+		ORDER BY guild_id ASC`, table)
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("list discord guilds: %w", err)
+		return nil, fmt.Errorf("list %s: %w", table, err)
 	}
 	defer rows.Close()
 

@@ -389,6 +389,66 @@ func TestLoadChampionsRoundMilestonesAfter(t *testing.T) {
 	}
 }
 
+func TestLoadChampionsDetailedCourseSummary(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "master.mdb")
+
+	schema := []string{
+		`CREATE TABLE text_data (id INTEGER NOT NULL, category INTEGER NOT NULL, "index" INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY(category, "index"))`,
+		`CREATE TABLE champions_race_condition (champions_id INTEGER NOT NULL, round_id INTEGER NOT NULL, race_instance_id INTEGER NOT NULL, race_condition_id INTEGER NOT NULL, PRIMARY KEY(champions_id, round_id))`,
+		`CREATE TABLE race_instance (id INTEGER PRIMARY KEY, race_id INTEGER NOT NULL)`,
+		`CREATE TABLE race (id INTEGER PRIMARY KEY, course_set INTEGER NOT NULL)`,
+		`CREATE TABLE race_course_set (id INTEGER PRIMARY KEY, race_track_id INTEGER NOT NULL, distance INTEGER NOT NULL, ground INTEGER NOT NULL, inout INTEGER NOT NULL, turn INTEGER NOT NULL)`,
+		`CREATE TABLE race_condition (id INTEGER PRIMARY KEY, season INTEGER NOT NULL, weather INTEGER NOT NULL, ground INTEGER NOT NULL)`,
+		`CREATE TABLE champions_round_schedule (id INTEGER PRIMARY KEY, champions_id INTEGER NOT NULL, round INTEGER NOT NULL, round_detail INTEGER NOT NULL, start_date INTEGER NOT NULL, end_date INTEGER NOT NULL, interval_start_time INTEGER NOT NULL, interval_end_time INTEGER NOT NULL)`,
+	}
+
+	createTestDB(t, dbPath, schema, []string{
+		`INSERT INTO text_data VALUES
+			(206, 206, 22, 'Aquarius Cup'),
+			(206, 206, 15, 'Cancer Cup'),
+			(206, 206, 11, 'Pisces Cup'),
+			(35, 35, 10006, 'Tokyo'),
+			(35, 35, 10009, 'Hanshin')`,
+		`INSERT INTO race_course_set VALUES
+			(201, 10006, 1600, 2, 1, 2),
+			(202, 10009, 2200, 1, 2, 1),
+			(203, 10009, 3200, 1, 4, 1)`,
+		`INSERT INTO race_condition VALUES
+			(1, 4, 4, 3),
+			(2, 2, 2, 2),
+			(3, 1, 3, 4)`,
+		`INSERT INTO race VALUES (101, 201), (102, 202), (103, 203)`,
+		`INSERT INTO race_instance VALUES (1, 101), (2, 102), (3, 103)`,
+		`INSERT INTO champions_race_condition VALUES
+			(22, 0, 1, 1),
+			(15, 0, 2, 2),
+			(11, 0, 3, 3)`,
+		`INSERT INTO champions_round_schedule VALUES
+			(1, 11, 1, 0, 1700000000, 1700100000, 0, 0),
+			(2, 15, 1, 0, 1700100000, 1700200000, 0, 0),
+			(3, 22, 1, 0, 1700200000, 1700300000, 0, 0)`,
+	})
+
+	milestones, err := LoadChampionsRoundMilestonesAfter(dbPath, 0)
+	if err != nil {
+		t.Fatalf("LoadChampionsRoundMilestonesAfter() error = %v", err)
+	}
+	want := []string{
+		"Hanshin Turf 3200m Outer→Inner Right (Spring, Rainy, Heavy)",
+		"Hanshin Turf 2200m Inner Right (Summer, Cloudy, Good)",
+		"Tokyo Dirt 1600m Left (Winter, Snowy, Soft)",
+	}
+	if len(milestones) != len(want) {
+		t.Fatalf("got %d milestones, want %d", len(milestones), len(want))
+	}
+	for i, m := range milestones {
+		if m.Course != want[i] {
+			t.Errorf("milestone[%d].Course = %q, want %q", i, m.Course, want[i])
+		}
+	}
+}
+
 func createTestDB(t *testing.T, path string, ddls, inserts []string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
